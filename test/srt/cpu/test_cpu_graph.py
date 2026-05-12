@@ -20,6 +20,7 @@ from sglang.test.test_utils import (
     popen_launch_server,
 )
 
+
 class TestCPUGraph(CustomTestCase):
 
     @intel_amx_benchmark(
