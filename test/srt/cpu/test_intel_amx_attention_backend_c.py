@@ -48,8 +48,6 @@ class TestIntelAMXAttnBackendQuant(CustomTestCase):
     def test_latency_w8a8_moe_model(self):
         return DEFAULT_MODEL_NAME_FOR_TEST_W8A8_WITH_MOE
 
-        
-
 
 if __name__ == "__main__":
     unittest.main()
