@@ -30,10 +30,6 @@ jobs:
     outputs:
       main_package: ${{ steps.filter.outputs.main_package || steps.run-mode.outputs.run_all_tests}}
     steps:
-      - name: Force Clean Workspace
-        run: |
-          sudo rm -rf ${{ github.workspace }}/*
-          
       - name: Checkout code
         uses: actions/checkout@v4
         with:
