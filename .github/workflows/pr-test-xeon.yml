@@ -29,6 +29,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       main_package: ${{ steps.filter.outputs.main_package || steps.run-mode.outputs.run_all_tests}}
+    env:
+      PYTHONDONTWRITEBYTECODE: 1
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
