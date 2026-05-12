@@ -81,10 +81,16 @@ jobs:
     needs: [check-changes, pr-gate]
     if: needs.check-changes.outputs.main_package == 'true'
     runs-on: xeon
+
     strategy:
       matrix:
         build_type: ['all']
     steps:
+      - name: Cleanup workspace
+        run: |
+          sudo rm -rf ${{ github.workspace }} || true
+          sudo mkdir -p ${{ github.workspace }}
+          sudo chown $(id -u):$(id -g) ${{ github.workspace }}
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
