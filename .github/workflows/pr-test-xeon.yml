@@ -32,9 +32,9 @@ jobs:
     env:
       PYTHONDONTWRITEBYTECODE: 1
     steps:
-      - name: Fix workspace permissions before checkout
+      - name: clean up
         run: |
-          sudo chown -R $USER:$USER ${{ github.workspace }} || true
+          sudo rm -rf ${{ github.workspace }}/*
       - name: Checkout code
         uses: actions/checkout@v4
         with:
