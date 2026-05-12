@@ -4,7 +4,6 @@ Usage:
 python3 -m unittest test_intel_amx_attention_backend_1.TestIntelAMXAttnBackendQuant.test_latency_fp8_qwen
 """
 
-import os
 import unittest
 
 from sglang.test.test_utils import (
@@ -14,7 +13,6 @@ from sglang.test.test_utils import (
     intel_amx_benchmark,
 )
 
-os.environ.pop("SGLANG_CPU_OMP_THREADS_BIND", None)
 
 class TestIntelAMXAttnBackendQuant(CustomTestCase):
 
