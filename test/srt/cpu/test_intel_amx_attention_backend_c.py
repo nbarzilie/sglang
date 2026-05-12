@@ -28,8 +28,6 @@ class TestIntelAMXAttnBackendQuant(CustomTestCase):
         min_throughput=100,
     )
     def test_latency_w8a8_default_model(self):
-        import os
-        os.environ.pop("SGLANG_CPU_OMP_THREADS_BIND", None)
         return DEFAULT_MODEL_NAME_FOR_TEST_W8A8
 
     @intel_amx_benchmark(
@@ -48,15 +46,8 @@ class TestIntelAMXAttnBackendQuant(CustomTestCase):
         min_throughput=100,
     )
     def test_latency_w8a8_moe_model(self):
-        import os
-        omp_bind = os.environ.get("SGLANG_CPU_OMP_THREADS_BIND")
-        if omp_bind:
-            print(f"[DEBUG] SGLANG_CPU_OMP_THREADS_BIND={omp_bind}")
-            os.environ["SGLANG_CPU_OMP_THREADS_BIND"] = omp_bind
-        try:
-            return DEFAULT_MODEL_NAME_FOR_TEST_W8A8_WITH_MOE
-        finally:
-            os.environ.pop("SGLANG_CPU_OMP_THREADS_BIND", None)
+        return DEFAULT_MODEL_NAME_FOR_TEST_W8A8_WITH_MOE
+
         
 
 
