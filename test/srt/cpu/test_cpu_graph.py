@@ -20,8 +20,6 @@ from sglang.test.test_utils import (
     popen_launch_server,
 )
 
-os.environ.pop("SGLANG_CPU_OMP_THREADS_BIND", None)
-
 class TestCPUGraph(CustomTestCase):
 
     @intel_amx_benchmark(
