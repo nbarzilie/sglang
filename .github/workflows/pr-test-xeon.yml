@@ -103,6 +103,7 @@ jobs:
       - name: Run container
         run: |
           docker run -dt \
+            -u $(id -u):$(id -g) \
             --env-file "$SGLANG_RUNNER_ENV_FILE" \
             --cpuset-cpus="$(python3 -c 'import os; v=os.environ.get("CPUSET_CPUS",""); print(",".join(map(str,range(int(v.split("-")[0]),int(v.split("-")[1])+1))) if "-" in v else v)')" \
             --cpuset-mems="$CPUSET_MEMS" \
