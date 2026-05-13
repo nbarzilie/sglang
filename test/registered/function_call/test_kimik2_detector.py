@@ -12,6 +12,7 @@ from sglang.srt.parser.reasoning_parser import KimiK2Detector as KimiK2Reasoning
 from sglang.test.ci.ci_register import register_cpu_ci
 
 register_cpu_ci(5, "stage-a-test-cpu")
+register_cpu_ci(est_time=7, suite="stage-c-test-cpu")
 
 
 def _make_tool(name, parameters=None):

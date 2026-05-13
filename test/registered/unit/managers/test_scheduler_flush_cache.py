@@ -10,6 +10,7 @@ from sglang.srt.managers.io_struct import FlushCacheReqInput
 from sglang.srt.managers.scheduler import Scheduler
 
 register_cpu_ci(est_time=14, suite="stage-a-test-cpu")
+register_cpu_ci(est_time=8, suite="stage-c-test-cpu")
 
 
 class TestSchedulerFlushCache(unittest.TestCase):

@@ -26,6 +26,7 @@ from sglang.test.ci.ci_register import register_cpu_ci
 from sglang.test.test_utils import CustomTestCase
 
 register_cpu_ci(est_time=120, suite="stage-a-test-cpu", nightly=True)
+register_cpu_ci(est_time=338, suite="stage-c-test-cpu")
 
 
 # ==================== Non-E2E Tests ====================
