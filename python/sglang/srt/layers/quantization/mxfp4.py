@@ -1211,8 +1211,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             x_padded = torch.nn.functional.pad(
                 x, (0, self.hidden_pad), mode="constant", value=0.0
             )
-            # MXFP4 + swiglu has no CK 2-stage codegen path in aiter; route it
-            # through the FlyDSL interleaved-gate kernels instead.
             quant_info = AiterMoeQuantInfo(
                 w13_weight=w13_weight,
                 w2_weight=w2_weight,
