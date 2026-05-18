@@ -1194,6 +1194,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             )[0]
             return StandardCombineInput(hidden_states=trtllm_gen_output)
         if _use_aiter:
+            from aiter.ops.flydsl.moe_common import GateMode
+
             from sglang.srt.layers.moe.moe_runner.aiter import (
                 AiterMoeQuantInfo,
                 AiterQuantType,
@@ -1209,6 +1211,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             x_padded = torch.nn.functional.pad(
                 x, (0, self.hidden_pad), mode="constant", value=0.0
             )
+            # MXFP4 + swiglu has no CK 2-stage codegen path in aiter; route it
+            # through the FlyDSL interleaved-gate kernels instead.
             quant_info = AiterMoeQuantInfo(
                 w13_weight=w13_weight,
                 w2_weight=w2_weight,
@@ -1221,6 +1225,11 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 doweight_stage1=self.moe_runner_config.apply_router_weight_on_input,
                 hidden_pad=self.hidden_pad,
                 intermediate_pad=self.intermediate_pad,
+                gate_mode=(
+                    GateMode.INTERLEAVE.value
+                    if self.runner.config.activation == "swiglu"
+                    else GateMode.SEPARATED.value
+                ),
             )
             return self.runner.run(
                 dispatch_output._replace(hidden_states=x_padded), quant_info

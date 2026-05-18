@@ -56,6 +56,10 @@ class AiterMoeQuantInfo(MoeQuantInfo):
     doweight_stage1: bool = False
     hidden_pad: int = 0
     intermediate_pad: int = 0
+    # AITER gate/up tile layout for stage1 GEMM. "separated" matches CK kernels;
+    # "interleave" routes MXFP4 + swiglu through the FlyDSL interleave path,
+    # which natively supports swiglu (CK 2-stage codegen does not).
+    gate_mode: str = "separated"
 
 
 @dataclass
@@ -147,6 +151,7 @@ class AiterRunnerCore(MoeRunnerCore):
             doweight_stage1=quant_info.doweight_stage1,
             hidden_pad=quant_info.hidden_pad,
             intermediate_pad=quant_info.intermediate_pad,
+            gate_mode=quant_info.gate_mode,
             **extra,
         )
         return AiterRunnerOutput(hidden_states=output)
