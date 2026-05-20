@@ -25,7 +25,29 @@ nbarzilie/docker_functest/
 
 ## 1. Build The Image
 
-Run this from the repository root, not from `nbarzilie/docker_functest`, because the Dockerfile copies the helper scripts from `nbarzilie/docker_functest/scripts`.
+Build from a small directory that contains only the Dockerfile and the `scripts/` folder. You do not need the full SGLang repository as the Docker build context because the Dockerfile clones your public branch during image build.
+
+Expected build context:
+
+```text
+docker_functest_build/
+  Dockerfile
+  scripts/
+    sglang_functest_common.sh
+    check_sglang_cpu_health.sh
+    run_qwen3_regular_nixl.sh
+    run_qwen3_pd_nixl.sh
+    run_disaggregation_nixl_basic_test.sh
+```
+
+If you are starting from this checkout, create that small build context with:
+
+```bash
+mkdir -p /tmp/docker_functest_build
+cp nbarzilie/docker_functest/Dockerfile /tmp/docker_functest_build/
+cp -R nbarzilie/docker_functest/scripts /tmp/docker_functest_build/
+cd /tmp/docker_functest_build
+```
 
 The Dockerfile clones your public SGLang fork branch during image build:
 
@@ -38,9 +60,8 @@ path:   /workspace/sglang
 This is intentional: the compute node or cluster job should not need to fetch the repository. Build the image once in an environment with internet access, convert/push it, and run the baked image on the cluster.
 
 ```bash
-cd /path/to/sglang
 docker build \
-  -f nbarzilie/docker_functest/Dockerfile \
+  -f Dockerfile \
   -t sglang-nixl-functest .
 ```
 
@@ -57,7 +78,7 @@ docker build \
   --build-arg BASE_IMAGE=lmsysorg/sglang:latest-cu130-runtime \
   --build-arg SGLANG_REPO_URL=https://github.com/nbarzilie/sglang.git \
   --build-arg SGLANG_BRANCH=feature/nixl-testing-suite \
-  -f nbarzilie/docker_functest/Dockerfile \
+  -f Dockerfile \
   -t sglang-nixl-functest .
 ```
 
@@ -150,11 +171,15 @@ That means the cluster job does not need to mount or import scripts separately. 
 Build the Docker image with the branch and scripts embedded:
 
 ```bash
-cd /path/to/sglang
+mkdir -p /tmp/docker_functest_build
+cp nbarzilie/docker_functest/Dockerfile /tmp/docker_functest_build/
+cp -R nbarzilie/docker_functest/scripts /tmp/docker_functest_build/
+cd /tmp/docker_functest_build
+
 docker build \
   --build-arg SGLANG_REPO_URL=https://github.com/nbarzilie/sglang.git \
   --build-arg SGLANG_BRANCH=feature/nixl-testing-suite \
-  -f nbarzilie/docker_functest/Dockerfile \
+  -f Dockerfile \
   -t sglang-nixl-functest:latest .
 ```
 

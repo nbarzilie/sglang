@@ -38,7 +38,7 @@ RUN rm -rf "${SGLANG_SOURCE_DIR}" \
     && git -C "${SGLANG_SOURCE_DIR}" rev-parse --short HEAD > /workspace/sglang_git_commit.txt \
     && git -C "${SGLANG_SOURCE_DIR}" remote -v > /workspace/sglang_git_remote.txt
 
-COPY nbarzilie/docker_functest/scripts/*.sh /usr/local/bin/
+COPY scripts/*.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/*.sh
 
 WORKDIR /workspace/sglang
