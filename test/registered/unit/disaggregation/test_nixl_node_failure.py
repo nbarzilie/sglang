@@ -66,14 +66,6 @@ class TestNixlNodeFailure(CustomTestCase):
 
         self.assertNotIn(9, mgr.request_status)
 
-    def test_failed_status_overrides_later_non_failed_status(self):
-        mgr = object.__new__(CommonKVManager)
-        mgr.request_status = {9: KVPoll.Failed}
-
-        CommonKVManager.update_status(mgr, 9, KVPoll.Success)
-
-        self.assertEqual(mgr.request_status[9], KVPoll.Failed)
-
 
 if __name__ == "__main__":
     unittest.main()

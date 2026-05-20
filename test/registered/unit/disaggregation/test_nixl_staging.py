@@ -1,7 +1,6 @@
 """Unit tests for NIXL staging-buffer control paths."""
 
 import unittest
-from collections import defaultdict
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -242,6 +241,7 @@ class TestNixlStaging(CustomTestCase):
         "sglang.srt.disaggregation.common.staging_buffer.gather_all_layers_to_staging"
     )
     def test_send_kvcache_staged_uses_one_bulk_vram_write(self, mock_gather):
+        high_ptr = 0xFFFF_81AB_54E0_1000
         agent = FakeAgent()
         mgr = self._make_manager(agent)
         mgr.kv_buffer_tensors = {
@@ -253,14 +253,14 @@ class TestNixlStaging(CustomTestCase):
         handle = mgr.send_kvcache_staged(
             "peer",
             np.array([1, 2], dtype=np.int32),
-            dst_staging_ptr=0xA000,
+            dst_staging_ptr=high_ptr + 0x1000,
             dst_staging_size=1 << 20,
             dst_gpu_id=4,
             dst_tp_rank=0,
             dst_attn_tp_size=1,
             dst_kv_item_len=128,
             notif="3_stg_0_1_1_0_0_2_decode_agent",
-            staging_buffer=FakeStagingBuffer(ptr=0x9000, size=1 << 20),
+            staging_buffer=FakeStagingBuffer(ptr=high_ptr, size=1 << 20),
         )
 
         self.assertEqual(handle, "handle")
@@ -271,6 +271,10 @@ class TestNixlStaging(CustomTestCase):
         self.assertEqual(dst_mem, "VRAM")
         self.assertEqual(src_reqs.shape, (1, 3))
         self.assertEqual(dst_reqs.shape, (1, 3))
+        self.assertEqual(src_reqs.dtype, np.uint64)
+        self.assertEqual(dst_reqs.dtype, np.uint64)
+        self.assertEqual(int(src_reqs[0, 0]), high_ptr)
+        self.assertGreaterEqual(int(dst_reqs[0, 0]), high_ptr + 0x1000)
         self.assertEqual(agent.initialize_xfer_calls[0][0], "WRITE")
         self.assertEqual(
             agent.initialize_xfer_calls[0][-1],

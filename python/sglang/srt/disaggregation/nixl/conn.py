@@ -1199,10 +1199,10 @@ class NixlKVManager(CommonKVManager):
         dst_write_ptr = dst_staging_ptr + rank_offset
         src_reqs = np.array(
             [[staging_buffer.get_ptr(), per_rank_bytes, self.kv_args.gpu_id]],
-            dtype=np.int64,
+            dtype=np.uint64,
         )
         dst_reqs = np.array(
-            [[dst_write_ptr, per_rank_bytes, dst_gpu_id]], dtype=np.int64
+            [[dst_write_ptr, per_rank_bytes, dst_gpu_id]], dtype=np.uint64
         )
 
         src_descs = self.agent.get_xfer_descs(src_reqs, "VRAM")

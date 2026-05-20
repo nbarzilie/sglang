@@ -234,7 +234,3 @@ git diff --check -- \
   test/registered/unit/disaggregation/test_nixl_hybrid_state.py \
   test/registered/unit/disaggregation/test_disaggregation_rank_mapping.py
 ```
-
-## Local Verification Note
-
-In the current local environment, direct test execution was blocked by missing Python dependencies from the SGLang import path, specifically `orjson`. The syntax compile and whitespace checks passed after the unit files were created.
