@@ -224,18 +224,23 @@ class EagleDraftInputV2Mixin:
         draft_model_runner: Any,
         cuda_graph_runner: Any,
     ):
-        seq_lens_cpu_ = batch.seq_lens_cpu
-        extend_num_tokens = len(batch.seq_lens) * num_draft_tokens
+        # Materialize post-verify seq_lens via one D2H on the forward stream.
+        # Drives prefix_lens (pre-increment) AND the new seq_lens_cpu /
+        # seq_lens_sum, breaking this site's dependency on the pre-isolation
+        # refresh_seq_lens_cpu mirror (precondition for seq_lens handle mode).
+        pre_extend_seq_lens = batch.seq_lens.tolist()
+        bs = len(pre_extend_seq_lens)
+        extend_num_tokens = bs * num_draft_tokens
 
         batch.spec_info = self
         batch.input_ids = predict
         batch.seq_lens = batch.seq_lens + num_draft_tokens
-        batch.seq_lens_cpu = batch.seq_lens_cpu + num_draft_tokens
-        # seq_lens_cpu was just CPU-updated in tandem — sync=False avoids
-        # a redundant D2H on the draft hot path.
-        batch.refresh_seq_lens_cpu(sync=False)
-        batch.extend_lens = [num_draft_tokens for _ in range(len(batch.seq_lens))]
-        batch.prefix_lens = seq_lens_cpu_.tolist()
+        batch.seq_lens_cpu = torch.tensor(
+            [s + num_draft_tokens for s in pre_extend_seq_lens], dtype=torch.int64
+        )
+        batch.seq_lens_sum = sum(pre_extend_seq_lens) + extend_num_tokens
+        batch.extend_lens = [num_draft_tokens] * bs
+        batch.prefix_lens = pre_extend_seq_lens
         batch.extend_num_tokens = extend_num_tokens
         capture_mode = (
             CaptureHiddenMode.NULL
