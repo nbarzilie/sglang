@@ -57,6 +57,46 @@ logger = logging.getLogger(__name__)
 GUARD = "NixlMsgGuard".encode("ascii")
 
 
+def load_nixl_agent_classes():
+    try:
+        from nixl._api import nixl_agent, nixl_agent_config
+    except ImportError as e:
+        raise ImportError(
+            "Please install NIXL by following the instructions at "
+            "https://github.com/ai-dynamo/nixl/blob/main/README.md "
+            "to run SGLang with NixlTransferEngine."
+        ) from e
+    return nixl_agent, nixl_agent_config
+
+
+def parse_nixl_backend_params(params: str) -> dict:
+    try:
+        backend_params = json.loads(params)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            "SGLANG_DISAGGREGATION_NIXL_BACKEND_PARAMS must be valid JSON"
+        ) from e
+    if not isinstance(backend_params, dict) or not all(
+        isinstance(key, str) and isinstance(value, str)
+        for key, value in backend_params.items()
+    ):
+        raise ValueError(
+            "SGLANG_DISAGGREGATION_NIXL_BACKEND_PARAMS must be a JSON object "
+            "with string keys and string values"
+        )
+    return backend_params
+
+
+def validate_nixl_backend_available(agent, backend: str):
+    available_plugins = agent.get_plugin_list()
+    if backend not in available_plugins:
+        raise ValueError(
+            f"NIXL backend '{backend}' not found. Available: {available_plugins}. "
+            f"Please install the required NIXL plugin or choose from: {available_plugins}"
+        )
+    return available_plugins
+
+
 @dataclasses.dataclass
 class TransferInfo:
     """Contains indices for a transfer, sent by KVReceiver. Received by prefill bootstrap thread."""
@@ -222,30 +262,16 @@ class NixlKVManager(CommonKVManager):
         is_mla_backend: Optional[bool] = False,
     ):
         super().__init__(args, disaggregation_mode, server_args, is_mla_backend)
-        try:
-            from nixl._api import nixl_agent, nixl_agent_config
-        except ImportError as e:
-            raise ImportError(
-                "Please install NIXL by following the instructions at "
-                "https://github.com/ai-dynamo/nixl/blob/main/README.md "
-                "to run SGLang with NixlTransferEngine."
-            ) from e
+        nixl_agent, nixl_agent_config = load_nixl_agent_classes()
 
         backend = envs.SGLANG_DISAGGREGATION_NIXL_BACKEND.get()
         num_threads = 8 if disaggregation_mode == DisaggregationMode.PREFILL else 0
-        backend_params = json.loads(
+        backend_params = parse_nixl_backend_params(
             envs.SGLANG_DISAGGREGATION_NIXL_BACKEND_PARAMS.get()
         )
-        if not isinstance(backend_params, dict) or not all(
-            isinstance(key, str) and isinstance(value, str)
-            for key, value in backend_params.items()
-        ):
-            raise ValueError(
-                "SGLANG_DISAGGREGATION_NIXL_BACKEND_PARAMS must be a JSON object "
-                "with string keys and string values"
-            )
         agent_config = nixl_agent_config(backends=[], num_threads=num_threads)
         self.agent = nixl_agent(str(uuid.uuid4()), agent_config)
+        validate_nixl_backend_available(self.agent, backend)
         if num_threads > 0:
             # TODO: Remove this once NIXL passes thread parameters from
             # nixl_agent_config to explicitly-created backends.
@@ -256,13 +282,6 @@ class NixlKVManager(CommonKVManager):
             elif backend == "UCCL":
                 backend_params.setdefault("num_cpus", str(num_threads))
         self.agent.create_backend(backend, backend_params)
-
-        available_plugins = self.agent.get_plugin_list()
-        if backend not in available_plugins:
-            raise ValueError(
-                f"NIXL backend '{backend}' not found. Available: {available_plugins}. "
-                f"Please install the required NIXL plugin or choose from: {available_plugins}"
-            )
         logger.info(f"NIXL KVManager initialized with backend: {backend}")
 
         self.register_buffer_to_engine()
