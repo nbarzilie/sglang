@@ -108,7 +108,6 @@ Key coverage:
 - Failed prefill node removes cached prefill info and room tracking.
 - Pending rooms from the failed node are marked failed.
 - Late failed updates do not resurrect cleared room state.
-- A failed request status is not overwritten by later non-failed updates.
 
 ### `test/registered/unit/disaggregation/test_nixl_staging.py`
 
@@ -123,7 +122,7 @@ Key coverage:
 - Deferred staging allocation requeues the chunk.
 - Oversized staging allocation raises an actionable error.
 - Staging transfer builds the expected bounded notification tag.
-- `send_kvcache_staged` posts one bulk `VRAM` `WRITE`.
+- `send_kvcache_staged` posts one bulk `VRAM` `WRITE` and preserves high-bit staging pointers with unsigned request arrays.
 - Staging transfer falls back when prefill staging buffer is too small.
 
 ### `test/registered/unit/disaggregation/test_nixl_hybrid_state.py`
