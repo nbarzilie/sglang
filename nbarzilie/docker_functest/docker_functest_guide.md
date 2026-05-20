@@ -105,7 +105,8 @@ If the model is gated, pass your Hugging Face token:
 Useful environment variables:
 
 ```text
-MODEL_PATH                                  default: Qwen/Qwen3-8B
+CPU_MODEL_PATH                              default: Qwen/Qwen3-0.6B for CPU health
+MODEL_PATH                                  default: Qwen/Qwen3-8B for regular GPU, Qwen/Qwen3-32B for PD GPU
 SGLANG_DISAGGREGATION_NIXL_BACKEND          default: UCX
 SGLANG_DISAGGREGATION_NIXL_BACKEND_PARAMS   default: {}
 DISAGG_IB_DEVICES                           optional, example: mlx5_0,mlx5_1
@@ -113,13 +114,15 @@ LOG_DIR                                     default: /tmp/sglang-functest-logs
 KEEP_ALIVE                                  default: 1 for GPU scripts, 0 for CPU health
 ```
 
-For a quick functional pass, keep the default `Qwen/Qwen3-8B`. For a larger 20-40B Qwen3 model on H100s, set `MODEL_PATH`, for example:
+Model defaults by script:
 
-```bash
--e MODEL_PATH=Qwen/Qwen3-32B
+```text
+check_sglang_cpu_health.sh      Qwen/Qwen3-0.6B
+run_qwen3_regular_nixl.sh       Qwen/Qwen3-8B
+run_qwen3_pd_nixl.sh            Qwen/Qwen3-32B
 ```
 
-For regular single-server testing of a 20-40B model on two H100s, also set `TP=2` and expose both GPUs. For PD testing, remember that prefill and decode each load the model on one GPU in this script, so `Qwen/Qwen3-8B` is the safer default; `Qwen/Qwen3-32B` requires enough per-GPU memory headroom for weights plus KV cache.
+For regular single-server testing of a 20-40B model on two H100s, set `MODEL_PATH=Qwen/Qwen3-32B`, set `TP=2`, and expose both GPUs. For PD testing, the default is `Qwen/Qwen3-32B`; prefill and decode each load the model on one GPU, so reduce `MODEL_PATH` if your cluster does not have enough per-GPU memory headroom for weights plus KV cache.
 
 ## 3. CPU Health Check
 
@@ -127,7 +130,7 @@ Run this locally or on a CPU-only node to verify the container can import SGLang
 
 ```bash
 docker run "${COMMON_DOCKER_ARGS[@]}" \
-  -e CPU_MODEL_PATH=Qwen/Qwen3-8B \
+  -e CPU_MODEL_PATH=Qwen/Qwen3-0.6B \
   sglang-nixl-functest \
   check_sglang_cpu_health.sh
 ```
@@ -225,7 +228,7 @@ srun \
   --ntasks=1 \
   --cpus-per-task=32 \
   --mem=0 \
-  bash -lc 'LOG_DIR=/logs MODEL_PATH=Qwen/Qwen3-8B run_qwen3_pd_nixl.sh'
+  bash -lc 'LOG_DIR=/logs MODEL_PATH=Qwen/Qwen3-32B run_qwen3_pd_nixl.sh'
 ```
 
 Example Slurm/Pyxis run for regular 2-GPU TP with a 32B model:
@@ -297,7 +300,7 @@ Run on one node with two H100s visible as GPUs 0 and 1:
 ```bash
 docker run "${COMMON_DOCKER_ARGS[@]}" \
   --gpus '"device=0,1"' \
-  -e MODEL_PATH=Qwen/Qwen3-8B \
+  -e MODEL_PATH=Qwen/Qwen3-32B \
   -e SGLANG_DISAGGREGATION_NIXL_BACKEND=UCX \
   sglang-nixl-functest \
   run_qwen3_pd_nixl.sh
@@ -319,7 +322,7 @@ If your NIXL/UCX setup requires explicit RDMA devices:
 ```bash
 docker run "${COMMON_DOCKER_ARGS[@]}" \
   --gpus '"device=0,1"' \
-  -e MODEL_PATH=Qwen/Qwen3-8B \
+  -e MODEL_PATH=Qwen/Qwen3-32B \
   -e DISAGG_IB_DEVICES=mlx5_0,mlx5_1 \
   sglang-nixl-functest \
   run_qwen3_pd_nixl.sh
@@ -417,6 +420,14 @@ Check GPUs:
 ```bash
 docker run --rm -it --gpus all sglang-nixl-functest nvidia-smi
 ```
+
+If you see this warning:
+
+```text
+WARNING: The NVIDIA Driver was not detected. GPU functionality will not be available.
+```
+
+that is fine for `check_sglang_cpu_health.sh`, but GPU scripts will not work in that container session. For GPU runs, start the container with NVIDIA GPU exposure, for example `--gpus '"device=0,1"'` with Docker, or the cluster runtime equivalent through Slurm/Pyxis/Enroot. Inside the running container, `nvidia-smi` must show the H100s and `torch.cuda.device_count()` must be `2` for the PD script.
 
 If PD hangs waiting for transfer:
 
