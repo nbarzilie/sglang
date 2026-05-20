@@ -3,7 +3,7 @@ set -euo pipefail
 
 source /usr/local/bin/sglang_functest_common.sh
 
-MODEL_PATH="${CPU_MODEL_PATH:-Qwen/Qwen3-0.6B}"
+MODEL_PATH="${CPU_MODEL_PATH:-Qwen/Qwen3-8B}"
 HOST="${HOST:-0.0.0.0}"
 PORT="${CPU_HEALTH_PORT:-31000}"
 CPU_TP="${CPU_TP:-1}"

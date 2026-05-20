@@ -25,7 +25,17 @@ nbarzilie/docker_functest/
 
 ## 1. Build The Image
 
-Run this from the repository root, not from `nbarzilie/docker_functest`, because the Dockerfile copies the local checkout into `/workspace/sglang`.
+Run this from the repository root, not from `nbarzilie/docker_functest`, because the Dockerfile copies the helper scripts from `nbarzilie/docker_functest/scripts`.
+
+The Dockerfile clones your public SGLang fork branch during image build:
+
+```text
+repo:   https://github.com/nbarzilie/sglang.git
+branch: feature/nixl-testing-suite
+path:   /workspace/sglang
+```
+
+This is intentional: the compute node or cluster job should not need to fetch the repository. Build the image once in an environment with internet access, convert/push it, and run the baked image on the cluster.
 
 ```bash
 cd /path/to/sglang
@@ -45,6 +55,8 @@ Override it if needed:
 ```bash
 docker build \
   --build-arg BASE_IMAGE=lmsysorg/sglang:latest-cu130-runtime \
+  --build-arg SGLANG_REPO_URL=https://github.com/nbarzilie/sglang.git \
+  --build-arg SGLANG_BRANCH=feature/nixl-testing-suite \
   -f nbarzilie/docker_functest/Dockerfile \
   -t sglang-nixl-functest .
 ```
@@ -94,7 +106,7 @@ Run this locally or on a CPU-only node to verify the container can import SGLang
 
 ```bash
 docker run "${COMMON_DOCKER_ARGS[@]}" \
-  -e CPU_MODEL_PATH=Qwen/Qwen3-0.6B \
+  -e CPU_MODEL_PATH=Qwen/Qwen3-8B \
   sglang-nixl-functest \
   check_sglang_cpu_health.sh
 ```
@@ -118,7 +130,7 @@ SGLANG_USE_CPU_ENGINE=1
 
 ## 4. Build, Embed Scripts, And Create SQSH
 
-The Dockerfile already copies the whole local checkout to:
+The Dockerfile clones the public branch into:
 
 ```text
 /workspace/sglang
@@ -135,21 +147,27 @@ and installs every functional script into:
 
 That means the cluster job does not need to mount or import scripts separately. You only pass the script name as the container command plus environment variables for model, ports, backend, and logs.
 
-Build the Docker image with embedded scripts:
+Build the Docker image with the branch and scripts embedded:
 
 ```bash
 cd /path/to/sglang
 docker build \
+  --build-arg SGLANG_REPO_URL=https://github.com/nbarzilie/sglang.git \
+  --build-arg SGLANG_BRANCH=feature/nixl-testing-suite \
   -f nbarzilie/docker_functest/Dockerfile \
   -t sglang-nixl-functest:latest .
 ```
 
-Quickly verify the scripts are inside the image:
+Quickly verify the branch and scripts are inside the image:
 
 ```bash
 docker run --rm sglang-nixl-functest:latest \
-  bash -lc 'ls -l /usr/local/bin/*qwen3* /usr/local/bin/*nixl* /usr/local/bin/check_sglang_cpu_health.sh'
+  bash -lc 'git -C /workspace/sglang remote -v && git -C /workspace/sglang rev-parse --abbrev-ref HEAD && git -C /workspace/sglang rev-parse --short HEAD && ls -l /usr/local/bin/*qwen3* /usr/local/bin/*nixl* /usr/local/bin/check_sglang_cpu_health.sh'
 ```
+
+At this point no later cluster command should run `git clone` or mount your local repository. The SQSH contains `/workspace/sglang` from the selected public branch.
+
+If you change any script under `nbarzilie/docker_functest/scripts/` or want a newer branch commit, rebuild the Docker image and recreate the `.sqsh`; the cluster will only see what was baked into that image.
 
 Create a SquashFS image for Enroot/Pyxis-style cluster runs:
 

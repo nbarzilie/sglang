@@ -4,6 +4,12 @@ set -euo pipefail
 export SGLANG_SOURCE_DIR="${SGLANG_SOURCE_DIR:-/workspace/sglang}"
 export PYTHONPATH="${SGLANG_SOURCE_DIR}/python:${PYTHONPATH:-}"
 
+if [ ! -d "${SGLANG_SOURCE_DIR}/python/sglang" ]; then
+  echo "SGLANG_SOURCE_DIR does not contain SGLang source: ${SGLANG_SOURCE_DIR}" >&2
+  exit 1
+fi
+cd "${SGLANG_SOURCE_DIR}"
+
 LOG_DIR="${LOG_DIR:-/tmp/sglang-functest-logs}"
 mkdir -p "${LOG_DIR}"
 
@@ -46,6 +52,11 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 check_python_deps() {
+  log "Using SGLang source: ${SGLANG_SOURCE_DIR}"
+  if git -C "${SGLANG_SOURCE_DIR}" rev-parse --short HEAD >/dev/null 2>&1; then
+    log "SGLang git branch: $(git -C "${SGLANG_SOURCE_DIR}" branch --show-current 2>/dev/null || true)"
+    log "SGLang git commit: $(git -C "${SGLANG_SOURCE_DIR}" rev-parse --short HEAD)"
+  fi
   python3 - <<'PY'
 import importlib
 import torch
