@@ -18,6 +18,48 @@ New helper functions:
 
 These helpers make NIXL import, backend parameter parsing, and plugin validation independently unit-testable.
 
+## Backend Source Map
+
+`python/sglang/srt/disaggregation/nixl/conn.py` implements SGLang's NIXL transfer backend for PD disaggregation. It wires decode-side metadata registration, prefill-side KV transfer, notification parsing, failure handling, staging buffers, and hybrid-state transfer.
+
+Important components:
+
+1. `load_nixl_agent_classes`, `parse_nixl_backend_params`, `validate_nixl_backend_available`
+   These setup helpers load `nixl._api`, validate `SGLANG_DISAGGREGATION_NIXL_BACKEND_PARAMS`, and fail early if the requested NIXL plugin is unavailable.
+
+2. `TransferInfo`
+   Per-request metadata sent from decode to prefill. It includes room ID, decode endpoint/port, decode agent name, destination KV indices, aux index, required response count, state indices, and `decode_prefix_len`. Its key edge case is decode-radix full hit: empty KV indices with `decode_prefix_len > 0` is not dummy because aux/state still must transfer.
+
+3. `KVArgsRegisterInfo`
+   One-time decode-side registration info sent to prefill. It carries decode agent metadata, destination KV/aux/state base pointers, GPU ID, decode TP rank/size, item lengths, and optional staging allocator info.
+
+4. `TransferStatus`
+   Decode-side completion tracker. It records KV chunks received per PP rank, expected chunk counts per PP rank, aux receipt, state receipt, and failure state. Completion requires aux plus all expected KV/state notifications.
+
+5. `NixlKVManager`
+   The main backend manager. It creates the NIXL agent/backend, registers KV/aux/state memory, starts worker/bootstrap/heartbeat threads, sends KV/aux/state transfers, parses notifications, handles staging, and records failures.
+
+6. KV transfer methods
+   `send_kvcache` and `_send_kvcache_generic` handle normal homogeneous TP or MLA transfers. `send_kvcache_slice` handles heterogeneous TP by transferring only relevant head slices. They build NIXL `VRAM` descriptors and post `WRITE` transfers.
+
+7. Staging methods
+   `_prefetch_staging_reqs`, `_do_staging_transfer`, and `send_kvcache_staged` support heterogeneous TP non-MLA staging: gather locally into staging, RDMA one bulk write, then decode scatters. The path falls back when staging is unavailable or too small.
+
+8. Aux and state transfer
+   `send_aux`, `_handle_aux_notification`, `_send_mamba_state`, `_send_mamba_state_slice`, and `maybe_send_extra` handle DRAM aux transfer and hybrid-state transfer for Mamba/SWA/NSA-style extra state. Aux/state completion is reported through notifications and tracked by `TransferStatus`.
+
+9. `NixlKVSender`
+   Prefill-side sender wrapper. It receives request metadata, decides whether KV chunks should be sent, queues transfer work, and handles zero-page last chunks for decode-radix full-hit requests so aux/state can still complete.
+
+10. `NixlKVReceiver`
+   Decode-side receiver wrapper. It sends metadata to prefill, registers decode buffers, polls transfer status, handles waiting timeout, and cleans room state after success/failure.
+
+11. Failure and node-liveness handling
+   Manager logic records transfer failures, updates request status monotonically, handles prefill-node heartbeat failures, removes failed node metadata/connections, marks pending rooms failed, and avoids resurrecting completed or cleared room state.
+
+12. `NixlKVBootstrapServer`
+   Thin subclass of the common bootstrap server.
+
 ## Test Files
 
 ### `test/registered/unit/disaggregation/test_nixl_transfer_info.py`
@@ -107,6 +149,7 @@ Key coverage:
 - Failed prefill node removes matching connection-pool entries.
 - Failed prefill node removes cached prefill info and room tracking.
 - Pending rooms from the failed node are marked failed.
+- Completed rooms are not resurrected as failed.
 - Late failed updates do not resurrect cleared room state.
 
 ### `test/registered/unit/disaggregation/test_nixl_staging.py`

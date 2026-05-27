@@ -217,46 +217,116 @@ Copy the `.sqsh` to shared storage visible from the compute node:
 cp sglang-nixl-functest.sqsh /shared/containers/
 ```
 
-Example Slurm/Pyxis run for PD NIXL:
+Example Slurm/Pyxis command to start a live shell inside the SQSH container:
 
 ```bash
 srun \
-  --container-image=/shared/containers/sglang-nixl-functest.sqsh \
-  --container-workdir=/workspace/sglang \
-  --container-mounts=$HOME/.cache/huggingface:/root/.cache/huggingface,/shared/logs:/logs \
-  --gres=gpu:2 \
-  --ntasks=1 \
-  --cpus-per-task=32 \
-  --mem=0 \
-  bash -lc 'LOG_DIR=/logs MODEL_PATH=Qwen/Qwen3-32B run_qwen3_pd_nixl.sh'
+  -A network_research_advdev \
+  -t 02:00:00 \
+  -N 1 \
+  -p interactive \
+  --gpus-per-node=8 \
+  --container-image=./sglang-nixl-functest.sqsh \
+  --container-workdir=/workspace \
+  --pty bash
 ```
 
-Example Slurm/Pyxis run for regular 2-GPU TP with a 32B model:
+Optional mounts, if your cluster accepts `--container-mounts`:
 
 ```bash
-srun \
-  --container-image=/shared/containers/sglang-nixl-functest.sqsh \
-  --container-workdir=/workspace/sglang \
-  --container-mounts=$HOME/.cache/huggingface:/root/.cache/huggingface,/shared/logs:/logs \
-  --gres=gpu:2 \
-  --ntasks=1 \
-  --cpus-per-task=32 \
-  --mem=0 \
-  bash -lc 'LOG_DIR=/logs MODEL_PATH=Qwen/Qwen3-32B TP=2 run_qwen3_regular_nixl.sh'
+--container-mounts=$HOME/.cache/huggingface:/root/.cache/huggingface,/shared/logs:/logs
 ```
 
-If your cluster uses a different container runtime, keep the same idea: use `sglang-nixl-functest.sqsh` as the image, set the environment variables, and run one of the `/usr/local/bin/*.sh` commands already baked into the image.
-
-## 5. Regular Qwen3 Single-Server Run
-
-Run on one H100:
+Once the shell starts, you should be inside the container. Confirm the baked source and GPU visibility:
 
 ```bash
-docker run "${COMMON_DOCKER_ARGS[@]}" \
-  --gpus '"device=0"' \
-  -e MODEL_PATH=Qwen/Qwen3-8B \
-  -e SGLANG_DISAGGREGATION_NIXL_BACKEND=UCX \
-  sglang-nixl-functest \
+cd /workspace/sglang
+git remote -v
+git branch --show-current
+git rev-parse --short HEAD
+nvidia-smi
+python3 -c 'import torch; print(torch.cuda.is_available(), torch.cuda.device_count())'
+```
+
+Expected GPU result for PD:
+
+```text
+True 2
+```
+
+If your cluster uses a different container runtime, keep the same idea: use `sglang-nixl-functest.sqsh` as the image, enter the live container shell, then run the phase 5-8 commands below from inside `/workspace/sglang`.
+
+## 5. PD Qwen3 With NIXL
+
+Run this inside the live SQSH/container shell:
+
+```bash
+LOG_DIR=/logs \
+  KEEP_ALIVE=0 \
+  MODEL_PATH=Qwen/Qwen3-32B \
+  SGLANG_DISAGGREGATION_NIXL_BACKEND=UCX \
+  DISAGG_IB_DEVICES=mlx5_0,mlx5_1 \
+  run_qwen3_pd_nixl.sh
+```
+
+If you do not need explicit RDMA devices, omit `DISAGG_IB_DEVICES`:
+
+```bash
+LOG_DIR=/logs \
+  KEEP_ALIVE=0 \
+  MODEL_PATH=Qwen/Qwen3-32B \
+  SGLANG_DISAGGREGATION_NIXL_BACKEND=UCX \
+  run_qwen3_pd_nixl.sh
+```
+
+For a smaller PD smoke before the 32B run:
+
+```bash
+LOG_DIR=/logs \
+  KEEP_ALIVE=0 \
+  MODEL_PATH=Qwen/Qwen3-8B \
+  SGLANG_DISAGGREGATION_NIXL_BACKEND=UCX \
+  DISAGG_IB_DEVICES=mlx5_0,mlx5_1 \
+  run_qwen3_pd_nixl.sh
+```
+
+For same-node testing where you want to force UCX away from IB, add:
+
+```bash
+UCX_TLS=sm,self,tcp,cuda_copy,cuda_ipc
+```
+
+The PD script launches:
+
+```text
+prefill: GPU 0, http://127.0.0.1:30100
+decode:  GPU 1, http://127.0.0.1:30200
+router:  http://127.0.0.1:30000
+bootstrap port: 30500
+```
+
+It waits for health on prefill, decode, and router, sends one `/generate` request through the router, and exits cleanly when `KEEP_ALIVE=0`.
+
+Useful overrides:
+
+```bash
+PREFILL_PORT=31100
+DECODE_PORT=31200
+ROUTER_PORT=31000
+BOOTSTRAP_PORT=31500
+PREFILL_EXTRA_ARGS="--context-length 4096"
+DECODE_EXTRA_ARGS="--context-length 4096"
+```
+
+## 6. Regular Qwen3 Single-Server Run
+
+Run this inside the live SQSH/container shell. Default model is `Qwen/Qwen3-8B`.
+
+```bash
+LOG_DIR=/logs \
+  KEEP_ALIVE=0 \
+  MODEL_PATH=Qwen/Qwen3-8B \
+  SGLANG_DISAGGREGATION_NIXL_BACKEND=UCX \
   run_qwen3_regular_nixl.sh
 ```
 
@@ -266,99 +336,39 @@ The script:
 - Starts `python3 -m sglang.launch_server`.
 - Waits for `http://127.0.0.1:30000/health`.
 - Sends one `/generate` request.
-- Keeps the server running until Ctrl-C unless `KEEP_ALIVE=0`.
+- Exits cleanly when `KEEP_ALIVE=0`.
 
 Change the port or TP:
 
 ```bash
--e REGULAR_PORT=30010
--e TP=1
+REGULAR_PORT=30010
+TP=1
 ```
 
 Pass extra SGLang args:
 
 ```bash
--e REGULAR_EXTRA_ARGS="--context-length 4096 --mem-fraction-static 0.75"
+REGULAR_EXTRA_ARGS="--context-length 4096 --mem-fraction-static 0.75"
 ```
 
 For a regular 32B run over two H100s:
 
 ```bash
-docker run "${COMMON_DOCKER_ARGS[@]}" \
-  --gpus '"device=0,1"' \
-  -e MODEL_PATH=Qwen/Qwen3-32B \
-  -e TP=2 \
-  -e SGLANG_DISAGGREGATION_NIXL_BACKEND=UCX \
-  sglang-nixl-functest \
+LOG_DIR=/logs \
+  KEEP_ALIVE=0 \
+  MODEL_PATH=Qwen/Qwen3-32B \
+  TP=2 \
+  SGLANG_DISAGGREGATION_NIXL_BACKEND=UCX \
   run_qwen3_regular_nixl.sh
-```
-
-## 6. PD Qwen3 With NIXL
-
-Run on one node with two H100s visible as GPUs 0 and 1:
-
-```bash
-docker run "${COMMON_DOCKER_ARGS[@]}" \
-  --gpus '"device=0,1"' \
-  -e MODEL_PATH=Qwen/Qwen3-32B \
-  -e SGLANG_DISAGGREGATION_NIXL_BACKEND=UCX \
-  sglang-nixl-functest \
-  run_qwen3_pd_nixl.sh
-```
-
-The script launches:
-
-```text
-prefill: GPU 0, http://127.0.0.1:30100
-decode:  GPU 1, http://127.0.0.1:30200
-router:  http://127.0.0.1:30000
-bootstrap port: 30500
-```
-
-It then waits for health on prefill, decode, and router, sends one `/generate` request through the router, and keeps all services alive until Ctrl-C unless `KEEP_ALIVE=0`.
-
-If your NIXL/UCX setup requires explicit RDMA devices:
-
-```bash
-docker run "${COMMON_DOCKER_ARGS[@]}" \
-  --gpus '"device=0,1"' \
-  -e MODEL_PATH=Qwen/Qwen3-32B \
-  -e DISAGG_IB_DEVICES=mlx5_0,mlx5_1 \
-  sglang-nixl-functest \
-  run_qwen3_pd_nixl.sh
-```
-
-For same-node testing where you want to force UCX away from IB, you can try:
-
-```bash
--e UCX_TLS=sm,self,tcp,cuda_copy,cuda_ipc
-```
-
-Port overrides:
-
-```bash
--e PREFILL_PORT=31100
--e DECODE_PORT=31200
--e ROUTER_PORT=31000
--e BOOTSTRAP_PORT=31500
-```
-
-Extra args:
-
-```bash
--e PREFILL_EXTRA_ARGS="--context-length 4096"
--e DECODE_EXTRA_ARGS="--context-length 4096"
 ```
 
 ## 7. Run The Registered NIXL Test
 
-Run:
+Run this inside the live SQSH/container shell:
 
 ```bash
-docker run "${COMMON_DOCKER_ARGS[@]}" \
-  --gpus '"device=0,1"' \
-  -e SGLANG_DISAGGREGATION_NIXL_BACKEND=UCX \
-  sglang-nixl-functest \
+LOG_DIR=/logs \
+  SGLANG_DISAGGREGATION_NIXL_BACKEND=UCX \
   run_disaggregation_nixl_basic_test.sh
 ```
 
@@ -380,14 +390,8 @@ All scripts write service logs under:
 
 To persist logs on the host:
 
-```bash
-mkdir -p functest_logs
-docker run "${COMMON_DOCKER_ARGS[@]}" \
-  --gpus '"device=0,1"' \
-  -v "$PWD/functest_logs:/logs" \
-  -e LOG_DIR=/logs \
-  sglang-nixl-functest \
-  run_qwen3_pd_nixl.sh
+```text
+Mount a host/shared directory to /logs when starting the SQSH container, then set LOG_DIR=/logs in phases 5-7.
 ```
 
 Useful files:
