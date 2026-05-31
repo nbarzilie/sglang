@@ -299,7 +299,12 @@ docker push <registry>/<namespace>/sglang:nixl-hopper
 Then create the `.sqsh` through Slurm/Pyxis:
 
 ```bash
-srun --ntasks=1 \
+srun \
+  -A network_research_advdev \
+  -t 02:00:00 \
+  -N 1 \
+  -p interactive \
+  --gpus-per-node=8 \
   --container-image=<registry>/<namespace>/sglang:nixl-hopper \
   --container-save=/shared/containers/sglang+nixl-hopper.sqsh \
   true
@@ -310,27 +315,60 @@ srun --ntasks=1 \
 Interactive shell:
 
 ```bash
-srun --partition=<partition> \
-  --nodes=1 \
-  --ntasks=1 \
-  --gpus-per-node=1 \
-  --container-image=/shared/containers/sglang+nixl-hopper.sqsh \
-  --container-mounts=$HOME/.cache/huggingface:/root/.cache/huggingface,/tmp/sglang-hicache:/data/hicache \
-  --container-workdir=/sgl-workspace/sglang \
+srun \
+  -A network_research_advdev \
+  -t 02:00:00 \
+  -N 1 \
+  -p interactive \
+  --gpus-per-node=8 \
+  --container-image=./sglang-nixl-functest.sqsh \
+  --container-workdir=/workspace \
   --pty bash
 ```
+
+Optional mounts and writable cache locations:
+
+```bash
+export MY=$HOME
+
+srun \
+  -A network_research_advdev \
+  -t 02:00:00 \
+  -N 1 \
+  -p interactive \
+  --gpus-per-node=8 \
+  --container-image=./sglang-nixl-functest.sqsh \
+  --container-workdir=/workspace \
+  --container-mounts=$MY/.cache/huggingface:/root/.cache/huggingface,$MY/logs:/logs \
+  --pty bash -lc '
+    mkdir -p /logs/{tmp,xdg-cache,sglang-cache,triton-cache,torchinductor-cache,nv-cache,tvm-ffi-cache} && \
+    export HF_HOME=/root/.cache/huggingface \
+           XDG_CACHE_HOME=/logs/xdg-cache \
+           SGLANG_CACHE_DIR=/logs/sglang-cache \
+           TRITON_CACHE_DIR=/logs/triton-cache \
+           TORCHINDUCTOR_CACHE_DIR=/logs/torchinductor-cache \
+           TVM_FFI_CACHE_DIR=/logs/tvm-ffi-cache \
+           CUDA_CACHE_PATH=/logs/nv-cache \
+           TMPDIR=/logs/tmp \
+           LOG_DIR=/logs && \
+    exec bash
+  '
+```
+
+For Hugging Face gated models, either log in on the host before launching so the mounted `$MY/.cache/huggingface` contains the token, or export `HF_TOKEN` before `srun` and pass it through Slurm, for example `--export=ALL,HF_TOKEN`. Avoid writing tokens into the Dockerfile or committing them to this runbook.
 
 Launch SGLang:
 
 ```bash
-srun --partition=<partition> \
-  --nodes=1 \
-  --ntasks=1 \
+srun \
+  -A network_research_advdev \
+  -t 02:00:00 \
+  -N 1 \
+  -p interactive \
   --gpus-per-node=8 \
-  --container-image=/shared/containers/sglang+nixl-hopper.sqsh \
-  --container-mounts=$HOME/.cache/huggingface:/root/.cache/huggingface,/tmp/sglang-hicache:/data/hicache \
-  --container-workdir=/sgl-workspace/sglang \
-  bash -lc 'python3 -m sglang.launch_server \
+  --container-image=./sglang-nixl-functest.sqsh \
+  --container-workdir=/workspace \
+  --pty bash -lc 'python3 -m sglang.launch_server \
     --model-path <model> \
     --host 0.0.0.0 \
     --port 30000 \
@@ -348,16 +386,18 @@ Use this when you already have an `.sqsh` and want to update SGLang inside it, t
 Do not mount over `/sgl-workspace/sglang` during this job. If you mount over it, the updated source will live on the host mount, not in the saved image.
 
 ```bash
-srun --partition=<partition> \
-  --nodes=1 \
-  --ntasks=1 \
-  --gpus-per-node=1 \
-  --container-image=/shared/containers/sglang+nixl-hopper.sqsh \
+srun \
+  -A network_research_advdev \
+  -t 02:00:00 \
+  -N 1 \
+  -p interactive \
+  --gpus-per-node=8 \
+  --container-image=./sglang-nixl-functest.sqsh \
   --container-save=/shared/containers/sglang+nixl-hopper-updated.sqsh \
   --container-writable \
   --container-remap-root \
-  --container-workdir=/sgl-workspace/sglang \
-  bash -lc '
+  --container-workdir=/workspace \
+  --pty bash -lc '
     set -eux
     cd /sgl-workspace/sglang
     git fetch --unshallow || true
@@ -371,16 +411,18 @@ srun --partition=<partition> \
 If dependencies changed:
 
 ```bash
-srun --partition=<partition> \
-  --nodes=1 \
-  --ntasks=1 \
-  --gpus-per-node=1 \
-  --container-image=/shared/containers/sglang+nixl-hopper.sqsh \
+srun \
+  -A network_research_advdev \
+  -t 02:00:00 \
+  -N 1 \
+  -p interactive \
+  --gpus-per-node=8 \
+  --container-image=./sglang-nixl-functest.sqsh \
   --container-save=/shared/containers/sglang+nixl-hopper-updated.sqsh \
   --container-writable \
   --container-remap-root \
-  --container-workdir=/sgl-workspace/sglang \
-  bash -lc '
+  --container-workdir=/workspace \
+  --pty bash -lc '
     set -eux
     cd /sgl-workspace/sglang
     git fetch --unshallow || true
@@ -397,14 +439,78 @@ srun --partition=<partition> \
 Then run future jobs from the updated image:
 
 ```bash
-srun --partition=<partition> \
-  --nodes=1 \
-  --ntasks=1 \
+srun \
+  -A network_research_advdev \
+  -t 02:00:00 \
+  -N 1 \
+  -p interactive \
   --gpus-per-node=8 \
   --container-image=/shared/containers/sglang+nixl-hopper-updated.sqsh \
-  --container-mounts=$HOME/.cache/huggingface:/root/.cache/huggingface,/tmp/sglang-hicache:/data/hicache \
-  --container-workdir=/sgl-workspace/sglang \
-  bash -lc 'python3 -m sglang.launch_server --model-path <model> --host 0.0.0.0 --port 30000 --tp 8 --enable-hierarchical-cache --hicache-storage-backend nixl'
+  --container-workdir=/workspace \
+  --pty bash -lc 'python3 -m sglang.launch_server --model-path <model> --host 0.0.0.0 --port 30000 --tp 8 --enable-hierarchical-cache --hicache-storage-backend nixl'
+```
+
+## Add Mooncake To The SQSH Image
+
+Use this when you want one image that can alternate between NIXL and Mooncake transfer backends. The base image in this guide uses CUDA 13, so install `mooncake-transfer-engine-cuda13`. Do not install the default `mooncake-transfer-engine` wheel in this image; that wheel links against CUDA 12 and fails with `libcudart.so.12` missing.
+
+```bash
+export MY=$HOME
+
+srun \
+  -A network_research_advdev \
+  -t 02:00:00 \
+  -N 1 \
+  -p interactive \
+  --gpus-per-node=8 \
+  --container-image=./sglang-nixl-functest.sqsh \
+  --container-save=./fresh-sglang-mooncake-cuda13.sqsh \
+  --container-writable \
+  --container-remap-root \
+  --container-workdir=/workspace \
+  --container-mounts=$MY/logs:/logs \
+  --pty bash -lc '
+    set -eux
+    mkdir -p /logs/{tmp,pip-cache}
+    export TMPDIR=/logs/tmp
+    export PIP_CACHE_DIR=/logs/pip-cache
+
+    python3 -m pip uninstall --break-system-packages -y mooncake-transfer-engine || true
+    python3 -m pip install --break-system-packages --upgrade mooncake-transfer-engine-cuda13
+
+    python3 -c "import sglang, nixl._api; from mooncake.engine import TransferEngine; print(\"SGLang/NIXL/Mooncake CUDA13 import OK\")"
+    command -v mooncake_master
+  '
+```
+
+Validate the saved image:
+
+```bash
+srun \
+  -A network_research_advdev \
+  -t 02:00:00 \
+  -N 1 \
+  -p interactive \
+  --gpus-per-node=8 \
+  --container-image=./fresh-sglang-mooncake-cuda13.sqsh \
+  --container-workdir=/workspace \
+  --pty bash -lc 'python3 -c "import sglang, nixl._api; from mooncake.engine import TransferEngine; print(\"OK\")"; command -v mooncake_master'
+```
+
+Select the transfer backend at launch time:
+
+```bash
+# Mooncake
+--disaggregation-transfer-backend mooncake
+
+# NIXL
+--disaggregation-transfer-backend nixl
+```
+
+For Mooncake RDMA, either let SGLang auto-discover IB devices or pass them explicitly:
+
+```bash
+--disaggregation-ib-device mlx5_0,mlx5_1
 ```
 
 ## Quick Validation
@@ -432,6 +538,7 @@ export SGLANG_HICACHE_NIXL_BACKEND_PLUGIN=POSIX
 
 - H100 and H20 are Hopper-class GPUs, so this guide uses `TORCH_CUDA_ARCH_LIST=9.0`.
 - The image defaults to CUDA 13.0.1 and installs `nixl` with `nixl-cu13`.
+- For Mooncake on this CUDA 13 image, use `mooncake-transfer-engine-cuda13`, not the default CUDA 12-linked `mooncake-transfer-engine` wheel.
 - Use `--ipc=host` and sufficient shared memory for SGLang.
 - Use `--network=host` and privileged/RDMA-capable runs when testing NIXL with RDMA or GDS paths.
 - For production, pin `SGLANG_REF` to a commit hash instead of `main`.
