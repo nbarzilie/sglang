@@ -32,7 +32,7 @@ nixl.Dockerfile
 #     -v /tmp/sglang-hicache:/data/hicache \
 #     -e HF_TOKEN=${HF_TOKEN} \
 #     sglang:nixl-hopper \
-#     python3 -m sglang.launch_server \
+#     sglang serve \
 #       --model-path meta-llama/Llama-3.1-8B-Instruct \
 #       --host 0.0.0.0 \
 #       --port 30000 \
@@ -209,7 +209,7 @@ docker run --gpus all \
   -v /tmp/sglang-hicache:/data/hicache \
   -e HF_TOKEN="${HF_TOKEN}" \
   sglang:nixl-hopper \
-  python3 -m sglang.launch_server \
+  sglang serve \
     --model-path <model> \
     --host 0.0.0.0 \
     --port 30000 \
@@ -279,14 +279,14 @@ If Docker is available where you build:
 
 ```bash
 DOCKER_BUILDKIT=1 docker build -f nixl.Dockerfile -t sglang:nixl-hopper .
-enroot import -o sglang+nixl-hopper.sqsh dockerd://sglang:nixl-hopper
+enroot import -o sglang-fresh.sqsh dockerd://sglang:nixl-hopper
 ```
 
 Put the resulting `.sqsh` on a shared filesystem visible to the Slurm compute nodes:
 
 ```bash
 mkdir -p /shared/containers
-cp sglang+nixl-hopper.sqsh /shared/containers/
+cp sglang-fresh.sqsh /shared/containers/
 ```
 
 If your cluster does not allow Docker but Pyxis can pull a registry image, push the Docker image to a registry first:
@@ -306,7 +306,7 @@ srun \
   -p interactive \
   --gpus-per-node=8 \
   --container-image=<registry>/<namespace>/sglang:nixl-hopper \
-  --container-save=/shared/containers/sglang+nixl-hopper.sqsh \
+  --container-save=./sglang-fresh.sqsh \
   true
 ```
 
@@ -321,8 +321,8 @@ srun \
   -N 1 \
   -p interactive \
   --gpus-per-node=8 \
-  --container-image=./sglang-nixl-functest.sqsh \
-  --container-workdir=/workspace \
+  --container-image=./sglang-fresh.sqsh \
+  --container-workdir=/sgl-workspace/sglang \
   --pty bash
 ```
 
@@ -337,8 +337,8 @@ srun \
   -N 1 \
   -p interactive \
   --gpus-per-node=8 \
-  --container-image=./sglang-nixl-functest.sqsh \
-  --container-workdir=/workspace \
+  --container-image=./sglang-fresh.sqsh \
+  --container-workdir=/sgl-workspace/sglang \
   --container-mounts=$MY/.cache/huggingface:/root/.cache/huggingface,$MY/logs:/logs \
   --pty bash -lc '
     mkdir -p /logs/{tmp,xdg-cache,sglang-cache,triton-cache,torchinductor-cache,nv-cache,tvm-ffi-cache} && \
@@ -366,9 +366,9 @@ srun \
   -N 1 \
   -p interactive \
   --gpus-per-node=8 \
-  --container-image=./sglang-nixl-functest.sqsh \
-  --container-workdir=/workspace \
-  --pty bash -lc 'python3 -m sglang.launch_server \
+  --container-image=./sglang-fresh.sqsh \
+  --container-workdir=/sgl-workspace/sglang \
+  --pty bash -lc 'sglang serve \
     --model-path <model> \
     --host 0.0.0.0 \
     --port 30000 \
@@ -392,19 +392,38 @@ srun \
   -N 1 \
   -p interactive \
   --gpus-per-node=8 \
-  --container-image=./sglang-nixl-functest.sqsh \
-  --container-save=/shared/containers/sglang+nixl-hopper-updated.sqsh \
+  --container-image=./sglang-fresh.sqsh \
+  --container-save=$MY/sqshs/sglang_fresh.sqsh \
   --container-writable \
   --container-remap-root \
-  --container-workdir=/workspace \
+  --container-workdir=/sgl-workspace/sglang \
   --pty bash -lc '
     set -eux
+
+    # 1. Install interactive editor/session tools
+    apt update
+    apt install -y nano vim tmux
+
+    # 2. Update the companion router and force-upgrade sglang-kernel
+    pip install sglang-router sglang-kernel --upgrade --force-reinstall --break-system-packages
+
+    # 3. Update the Git repository
     cd /sgl-workspace/sglang
     git fetch --unshallow || true
-    git fetch origin
-    git checkout <branch-or-tag-or-commit>
-    python3 -m pip install --no-deps -e python
-    python3 -c "import sglang, torch, nixl._api; print(\"SGLang/NIXL OK, torch CUDA:\", torch.version.cuda)"
+    git remote set-branches origin main || true
+    git fetch origin main
+    git checkout main
+    git pull origin main
+
+    # 4. Setup Rust toolchain for building the core extensions
+    curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    . "$HOME/.cargo/env"
+
+    # 5. Compile and link the editable core SGLang version
+    python3 -m pip install --no-deps -e python --break-system-packages
+
+    # 6. Verify the full ecosystem imports correctly without version exceptions
+    python3 -c "import sglang, sglang_kernel, sglang_router, torch, nixl._api; print(\"Everything OK!\")"
   '
 ```
 
@@ -417,11 +436,11 @@ srun \
   -N 1 \
   -p interactive \
   --gpus-per-node=8 \
-  --container-image=./sglang-nixl-functest.sqsh \
-  --container-save=/shared/containers/sglang+nixl-hopper-updated.sqsh \
+  --container-image=./sglang-fresh.sqsh \
+  --container-save=./sglang-fresh-updated.sqsh \
   --container-writable \
   --container-remap-root \
-  --container-workdir=/workspace \
+  --container-workdir=/sgl-workspace/sglang \
   --pty bash -lc '
     set -eux
     cd /sgl-workspace/sglang
@@ -445,9 +464,36 @@ srun \
   -N 1 \
   -p interactive \
   --gpus-per-node=8 \
-  --container-image=/shared/containers/sglang+nixl-hopper-updated.sqsh \
-  --container-workdir=/workspace \
-  --pty bash -lc 'python3 -m sglang.launch_server --model-path <model> --host 0.0.0.0 --port 30000 --tp 8 --enable-hierarchical-cache --hicache-storage-backend nixl'
+  --container-image=$MY/sqshs/sglang_fresh.sqsh \
+  --container-workdir=/sgl-workspace/sglang \
+  --pty bash -lc 'sglang serve --model-path <model> --host 0.0.0.0 --port 30000 --tp 8 --enable-hierarchical-cache --hicache-storage-backend nixl'
+```
+
+later use it with:
+
+```bash
+srun -A network_research_advdev \
+     -p interactive \
+     -t 2:00:00 \
+     -N 1 \
+     --gpus-per-node=8 \
+     --mem=0 \
+     --container-image=$MY/sqshs/sglang_fresh.sqsh \
+     --container-workdir=/sgl-workspace/sglang \
+     --container-mounts=$MY/.cache/huggingface:/root/.cache/huggingface,$MY/logs:/logs \
+     --pty bash -lc '
+       mkdir -p /logs/{tmp,xdg-cache,sglang-cache,triton-cache,torchinductor-cache,nv-cache,tvm-ffi-cache} && \
+       export HF_HOME=/root/.cache/huggingface \
+              XDG_CACHE_HOME=/logs/xdg-cache \
+              SGLANG_CACHE_DIR=/logs/sglang-cache \
+              TRITON_CACHE_DIR=/logs/triton-cache \
+              TORCHINDUCTOR_CACHE_DIR=/logs/torchinductor-cache \
+              TVM_FFI_CACHE_DIR=/logs/tvm-ffi-cache \
+              CUDA_CACHE_PATH=/logs/nv-cache \
+              TMPDIR=/logs/tmp \
+              LOG_DIR=/logs && \
+       exec bash
+     '
 ```
 
 ## Add Mooncake To The SQSH Image
@@ -463,11 +509,11 @@ srun \
   -N 1 \
   -p interactive \
   --gpus-per-node=8 \
-  --container-image=./sglang-nixl-functest.sqsh \
+  --container-image=./sglang-fresh.sqsh \
   --container-save=./fresh-sglang-mooncake-cuda13.sqsh \
   --container-writable \
   --container-remap-root \
-  --container-workdir=/workspace \
+  --container-workdir=/sgl-workspace/sglang \
   --container-mounts=$MY/logs:/logs \
   --pty bash -lc '
     set -eux
@@ -493,8 +539,37 @@ srun \
   -p interactive \
   --gpus-per-node=8 \
   --container-image=./fresh-sglang-mooncake-cuda13.sqsh \
-  --container-workdir=/workspace \
+  --container-workdir=/sgl-workspace/sglang \
   --pty bash -lc 'python3 -c "import sglang, nixl._api; from mooncake.engine import TransferEngine; print(\"OK\")"; command -v mooncake_master'
+```
+
+Run a Mooncake-capable interactive shell with Hugging Face and writable cache mounts:
+
+```bash
+export MY=$HOME
+
+srun \
+  -A network_research_advdev \
+  -t 02:00:00 \
+  -N 1 \
+  -p interactive \
+  --gpus-per-node=8 \
+  --container-image=./fresh-sglang-mooncake-cuda13.sqsh \
+  --container-workdir=/sgl-workspace/sglang \
+  --container-mounts=$MY/.cache/huggingface:/root/.cache/huggingface,$MY/logs:/logs \
+  --pty bash -lc '
+    mkdir -p /logs/{tmp,xdg-cache,sglang-cache,triton-cache,torchinductor-cache,nv-cache,tvm-ffi-cache} && \
+    export HF_HOME=/root/.cache/huggingface \
+           XDG_CACHE_HOME=/logs/xdg-cache \
+           SGLANG_CACHE_DIR=/logs/sglang-cache \
+           TRITON_CACHE_DIR=/logs/triton-cache \
+           TORCHINDUCTOR_CACHE_DIR=/logs/torchinductor-cache \
+           TVM_FFI_CACHE_DIR=/logs/tvm-ffi-cache \
+           CUDA_CACHE_PATH=/logs/nv-cache \
+           TMPDIR=/logs/tmp \
+           LOG_DIR=/logs && \
+    exec bash
+  '
 ```
 
 Select the transfer backend at launch time:
