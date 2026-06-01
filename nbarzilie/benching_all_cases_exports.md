@@ -84,7 +84,9 @@ export BACKEND=nixl
 export MODEL=meta-llama/Llama-3.1-8B-Instruct
 export IB_DEV=mlx5_0
 export LOG_DIR=/logs
-export MAX_CONCURRENCY=
+export CONCURRENCY_VALUES="1 2 4 8 16 32 64 128 256"
+export MIN_PROMPTS=100
+export PROMPTS_PER_CONCURRENCY=10
 
 export CASE_NAME=Ptp2_Dtp2_Pdp2_Ddp2
 export PREFILL_TP_SIZE=2
@@ -161,7 +163,7 @@ printf "decode:  tp=%s dp=%s base_gpu=%s\n" "$DECODE_TP_SIZE" "$DECODE_DP_SIZE" 
 You can also dump the relevant environment in sorted form:
 
 ```bash
-env | grep -E "^(BACKEND|MODEL|CASE_NAME|PREFILL_|DECODE_|ROUTER_|IB_DEV|LOG_DIR|MAX_CONCURRENCY|SGLANG_DISAGGREGATION_)" | sort
+env | grep -E "^(BACKEND|MODEL|CASE_NAME|PREFILL_|DECODE_|ROUTER_|IB_DEV|LOG_DIR|CONCURRENCY_VALUES|MIN_PROMPTS|PROMPTS_PER_CONCURRENCY|SGLANG_DISAGGREGATION_)" | sort
 ```
 
 
@@ -274,6 +276,8 @@ The benchmark script accepts `rand`, `sharegpt`, or `radixcache`.
 
 Do not set `--dataset-path` for these standard profiles. Select the workload by `--dataset-name` only.
 
+Important: `generated-shared-prefix` does not use `--num-prompts` to size the dataset. Its request count is `--gsp-num-groups * --gsp-prompts-per-group`. The benchmark script below recomputes those two GSP arguments inside the loop so the printed `num-prompts` value matches the actual request count.
+
 ## Model Options
 
 Select one model:
@@ -297,11 +301,12 @@ export MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat
 
 
 
-Leave `MAX_CONCURRENCY` empty to send requests without a client-side cap.
-Set it when you want an explicit cap:
+Set the concurrency sweep and prompt-count scaling. The benchmark script below computes `num_prompts = max(MIN_PROMPTS, PROMPTS_PER_CONCURRENCY * max_concurrency)` for each concurrency point. This keeps low-concurrency runs short while giving high-concurrency runs enough requests for stable batching:
 
 ```bash
-export MAX_CONCURRENCY=64
+export CONCURRENCY_VALUES="1 2 4 8 16 32 64 128 256"
+export MIN_PROMPTS=100
+export PROMPTS_PER_CONCURRENCY=10
 ```
 
 ## Terminal 1: Prefill
@@ -375,15 +380,12 @@ mkdir -p "$LOG_DIR"
 
 case "$DATASET" in
   rand)
-    DATASET_ARGS=(--dataset-name random --random-input-len 1024 --random-output-len 1024 --random-range-ratio 1.0)
     DATASET_LABEL=rand
     ;;
   sharegpt)
-    DATASET_ARGS=(--dataset-name sharegpt --sharegpt-output-len 1024)
     DATASET_LABEL=sharegpt
     ;;
   radixcache)
-    DATASET_ARGS=(--dataset-name generated-shared-prefix --gsp-num-groups 64 --gsp-prompts-per-group 16 --gsp-system-prompt-len 2048 --gsp-question-len 128 --gsp-output-len 1024 --gsp-range-ratio 1.0)
     DATASET_LABEL=radixcache
     ;;
   *)
@@ -394,10 +396,45 @@ esac
 
 LOG_FILE="$LOG_DIR/${BACKEND}_${CASE_NAME}_${DATASET_LABEL}.log"
 : > "$LOG_FILE"
+CONCURRENCY_VALUES="${CONCURRENCY_VALUES:-1 2 4 8 16 32 64 128 256}"
+MIN_PROMPTS="${MIN_PROMPTS:-100}"
+PROMPTS_PER_CONCURRENCY="${PROMPTS_PER_CONCURRENCY:-10}"
 
-for num_prompts in 1 2 4 8 16 32 64 128 256 512 1024
+for max_conc in $CONCURRENCY_VALUES
 do
-  echo "========== num-prompts: $num_prompts dataset: $DATASET_LABEL ==========" | tee -a "$LOG_FILE"
+  num_prompts=$((max_conc * PROMPTS_PER_CONCURRENCY))
+  if [ "$num_prompts" -lt "$MIN_PROMPTS" ]; then
+    num_prompts="$MIN_PROMPTS"
+  fi
+
+  case "$DATASET" in
+    rand)
+      DATASET_ARGS=(--dataset-name random --random-input-len 1024 --random-output-len 1024 --random-range-ratio 1.0 --num-prompts "$num_prompts")
+      ;;
+    sharegpt)
+      DATASET_ARGS=(--dataset-name sharegpt --sharegpt-output-len 1024 --num-prompts "$num_prompts")
+      ;;
+    radixcache)
+      GSP_NUM_GROUPS=1
+      GSP_GROUP_LIMIT="$num_prompts"
+      if [ "$GSP_GROUP_LIMIT" -gt 64 ]; then
+        GSP_GROUP_LIMIT=64
+      fi
+      for ((candidate=GSP_GROUP_LIMIT; candidate>=1; candidate--)); do
+        if [ $((num_prompts % candidate)) -eq 0 ]; then
+          GSP_NUM_GROUPS="$candidate"
+          break
+        fi
+      done
+      GSP_PROMPTS_PER_GROUP=$((num_prompts / GSP_NUM_GROUPS))
+      DATASET_ARGS=(--dataset-name generated-shared-prefix --gsp-num-groups "$GSP_NUM_GROUPS" --gsp-prompts-per-group "$GSP_PROMPTS_PER_GROUP" --gsp-system-prompt-len 2048 --gsp-question-len 128 --gsp-output-len 1024 --gsp-range-ratio 1.0)
+      ;;
+  esac
+
+  echo "========== max-concurrency: $max_conc num-prompts: $num_prompts dataset: $DATASET_LABEL ==========" | tee -a "$LOG_FILE"
+  if [ "$DATASET" = "radixcache" ]; then
+    echo "GSP actual prompts: $((GSP_NUM_GROUPS * GSP_PROMPTS_PER_GROUP)) ($GSP_NUM_GROUPS groups x $GSP_PROMPTS_PER_GROUP prompts/group)" | tee -a "$LOG_FILE"
+  fi
   for run in 1 2
   do
     echo "--- Run $run ---" | tee -a "$LOG_FILE"
@@ -405,13 +442,10 @@ do
       --backend sglang
       --base-url "$ROUTER_URL"
       "${DATASET_ARGS[@]}"
-      --num-prompts "$num_prompts"
+      --max-concurrency "$max_conc"
       --pd-separated
       --warmup-requests 2
       --output-details)
-    if [ -n "${MAX_CONCURRENCY:-}" ]; then
-      CMD+=(--max-concurrency "$MAX_CONCURRENCY")
-    fi
     "${CMD[@]}" 2>&1 | tee -a "$LOG_FILE"
     echo "" | tee -a "$LOG_FILE"
   done
