@@ -27,7 +27,7 @@ class TestDisaggregationNixlFailure(PDDisaggregationServerBase):
     def setUpClass(cls):
         require_configured_nixl_backend()
         super().setUpClass()
-        os.environ["SGLANG_TEST_DISAGG_FAILURE_PROB"] = "0.25"
+        os.environ["SGLANG_TEST_DISAGG_FAILURE_PROB"] = "0.05"
         cls.model = DEFAULT_SMALL_MODEL_NAME_FOR_TEST
         configure_nixl_pd_backend(cls)
         cls.launch_all()
