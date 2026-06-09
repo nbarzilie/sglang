@@ -1,5 +1,7 @@
+import json
 import os
 import unittest
+import uuid
 
 import requests
 
@@ -10,14 +12,79 @@ from sglang.test.server_fixtures.disaggregation_fixture import (
 from sglang.test.server_fixtures.disaggregation_utils import (
     assert_process_healthy,
     configure_nixl_pd_backend,
-    has_configured_nixl_backend,
-    require_configured_nixl_backend,
 )
 from sglang.test.test_utils import DEFAULT_SMALL_MODEL_NAME_FOR_TEST, is_in_ci
 
 register_cuda_ci(est_time=440, stage="base-b", runner_config="2-gpu-large")
 
-_HAS_CONFIGURED_NIXL_BACKEND = is_in_ci() or has_configured_nixl_backend()
+
+def _nixl_backend_config(backend, backend_params_json):
+    backend_params = json.loads(backend_params_json)
+    if not isinstance(backend_params, dict) or not all(
+        isinstance(key, str) and isinstance(value, str)
+        for key, value in backend_params.items()
+    ):
+        raise ValueError(
+            "SGLANG_DISAGGREGATION_NIXL_BACKEND_PARAMS must be a JSON object "
+            "with string keys and string values"
+        )
+
+    if backend == "UCX" or backend == "OBJ":
+        backend_params.setdefault("num_threads", "8")
+    elif backend == "GDS_MT":
+        backend_params.setdefault("thread_count", "8")
+    elif backend == "UCCL":
+        backend_params.setdefault("num_cpus", "8")
+
+    return backend, backend_params
+
+
+def _get_configured_nixl_backend_probe_error(
+    backend=None,
+    backend_params_json=None,
+):
+    backend = backend or os.getenv("SGLANG_DISAGGREGATION_NIXL_BACKEND", "UCX")
+    backend_params_json = backend_params_json or os.getenv(
+        "SGLANG_DISAGGREGATION_NIXL_BACKEND_PARAMS", "{}"
+    )
+
+    try:
+        from nixl._api import nixl_agent, nixl_agent_config
+    except ImportError as e:
+        return f"NIXL import failed: {e}"
+
+    try:
+        backend, backend_params = _nixl_backend_config(backend, backend_params_json)
+    except (json.JSONDecodeError, ValueError) as e:
+        return str(e)
+
+    try:
+        agent_config = nixl_agent_config(backends=[], num_threads=8)
+        agent = nixl_agent(f"sglang_nixl_probe_{uuid.uuid4()}", agent_config)
+        available_plugins = agent.get_plugin_list()
+        if backend not in available_plugins:
+            return (
+                f"NIXL backend {backend!r} not found. "
+                f"Available plugins: {available_plugins}."
+            )
+        agent.create_backend(backend, backend_params)
+    except Exception as e:
+        return f"NIXL backend probe failed: {e}"
+
+    return None
+
+
+def _has_configured_nixl_backend():
+    return _get_configured_nixl_backend_probe_error() is None
+
+
+def _require_configured_nixl_backend():
+    error = _get_configured_nixl_backend_probe_error()
+    if error is not None:
+        raise RuntimeError(error)
+
+
+_HAS_CONFIGURED_NIXL_BACKEND = is_in_ci() or _has_configured_nixl_backend()
 
 
 @unittest.skipUnless(
@@ -35,7 +102,7 @@ class TestDisaggregationNixlBasic(PDDisaggregationServerBase):
 
     @classmethod
     def setUpClass(cls):
-        require_configured_nixl_backend()
+        _require_configured_nixl_backend()
         super().setUpClass()
         cls.model = DEFAULT_SMALL_MODEL_NAME_FOR_TEST
         configure_nixl_pd_backend(cls)
@@ -90,7 +157,7 @@ class TestDisaggregationNixlBasic(PDDisaggregationServerBase):
 class TestDisaggregationNixlFailure(PDDisaggregationServerBase):
     @classmethod
     def setUpClass(cls):
-        require_configured_nixl_backend()
+        _require_configured_nixl_backend()
         super().setUpClass()
         os.environ["SGLANG_TEST_DISAGG_FAILURE_PROB"] = "0.05"
         cls.model = DEFAULT_SMALL_MODEL_NAME_FOR_TEST
