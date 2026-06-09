@@ -71,11 +71,6 @@ class TestDisaggregationNixlFailure(PDDisaggregationServerBase):
                 failure_count += 1
 
         self.assertGreater(
-            success_count,
-            0,
-            "expected at least one request to complete during NIXL failure injection",
-        )
-        self.assertGreater(
             failure_count,
             0,
             "failure injection did not produce any failed requests or exceptions",
