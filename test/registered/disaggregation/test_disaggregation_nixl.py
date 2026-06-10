@@ -5,6 +5,7 @@ import uuid
 
 import requests
 
+from sglang.srt.environ import envs
 from sglang.test.ci.ci_register import register_cuda_ci
 from sglang.test.server_fixtures.disaggregation_fixture import (
     PDDisaggregationServerBase,
@@ -39,14 +40,9 @@ def _nixl_backend_config(backend, backend_params_json):
     return backend, backend_params
 
 
-def _get_configured_nixl_backend_probe_error(
-    backend=None,
-    backend_params_json=None,
-):
-    backend = backend or os.getenv("SGLANG_DISAGGREGATION_NIXL_BACKEND", "UCX")
-    backend_params_json = backend_params_json or os.getenv(
-        "SGLANG_DISAGGREGATION_NIXL_BACKEND_PARAMS", "{}"
-    )
+def _get_configured_nixl_backend_probe_error():
+    backend = envs.SGLANG_DISAGGREGATION_NIXL_BACKEND.get()
+    backend_params_json = envs.SGLANG_DISAGGREGATION_NIXL_BACKEND_PARAMS.get()
 
     try:
         from nixl._api import nixl_agent, nixl_agent_config
