@@ -7,7 +7,7 @@ This guide assumes:
   mounted from `$MY/logs/scripts/pd_bench/fingerprint.sh`.
 - You compare only runtime backend selection: `BACKEND=nixl` vs
   `BACKEND=mooncake`.
-- You can run at most two active Slurm jobs.
+- You can run at least 10 active Slurm jobs.
 - Each job is limited to 2 hours.
 - Each node has 8 GPUs.
 
@@ -23,7 +23,7 @@ nodes: 1
 backends: nixl, mooncake
 cases: Ptp2_Dtp2_Pdp1_Ddp1
 datasets: rand
-concurrency: 1 8 32
+concurrency: 2 8 32 64
 reps: 1
 ```
 
@@ -37,9 +37,29 @@ cases:
   Ptp4_Dtp4_Pdp1_Ddp1
   Ptp2_Dtp4_Pdp1_Ddp1
   Ptp4_Dtp2_Pdp1_Ddp1
-datasets: rand sharegpt radixcache
-concurrency: 1 8 32
+datasets: rand sharegpt radixcache radixcache_cold
+concurrency: 2 8 32 64
 reps: 5
+```
+
+Phase 1 shard count:
+
+```text
+4 cases x 4 datasets = 16 sbatch jobs
+```
+
+Each Phase 1 job should run exactly one case and one dataset, with both
+backends, all four concurrency points, and five reps. This keeps backend
+comparison inside the same Slurm allocation while staying under the 2-hour job
+limit.
+
+Request counts are fixed by concurrency:
+
+```text
+c2  -> 128 requests
+c8  -> 512 requests
+c32 -> 1024 requests
+c64 -> 1024 requests
 ```
 
 Phase 2 high-concurrency two-node sweep:
@@ -73,6 +93,7 @@ Run this from the SGLang checkout on the host before submitting jobs.
 ```bash
 export HF_TOKEN=<HF_TOKEN>
 export MY=<cluster_workspace_root>
+export IMAGE="$MY/sqshs/sglang_pd_transfer_united.sqsh"
 
 mkdir -p "$MY/logs/scripts/pd_bench"
 mkdir -p "$MY/logs/pd_bench"
@@ -84,6 +105,12 @@ if [ -f nbarzilie/benching/fingerprint.sh ]; then
 fi
 chmod +x "$MY/logs/scripts/pd_bench/fingerprint.sh"
 ```
+
+`IMAGE` must be exported before every direct or interactive call to
+`run_pd_backend_matrix.sh`. The runner writes this exact environment value to
+`run_meta.json` as `"image": os.environ.get("IMAGE")`. The sbatch wrappers below
+honor an existing exported `IMAGE` and otherwise default to
+`$MY/sqshs/sglang_pd_transfer_united.sqsh`.
 
 The mounted paths inside the container will be:
 
@@ -148,13 +175,10 @@ IMAGE="${IMAGE:-unknown}"
 IB_DEV="${IB_DEV:-mlx5_0}"
 BACKENDS="${BACKENDS:-nixl mooncake}"
 CASES="${CASES:-Ptp2_Dtp2_Pdp1_Ddp1 Ptp4_Dtp4_Pdp1_Ddp1 Ptp2_Dtp4_Pdp1_Ddp1 Ptp4_Dtp2_Pdp1_Ddp1}"
-DATASETS="${DATASETS:-rand sharegpt radixcache}"
-CONCURRENCY_VALUES="${CONCURRENCY_VALUES:-1 8 32}"
+DATASETS="${DATASETS:-rand sharegpt radixcache radixcache_cold}"
+CONCURRENCY_VALUES="${CONCURRENCY_VALUES:-2 8 32 64}"
 REPS="${REPS:-5}"
-MIN_PROMPTS="${MIN_PROMPTS:-100}"
-PROMPTS_PER_CONCURRENCY="${PROMPTS_PER_CONCURRENCY:-10}"
 OUTPUT_DETAILS="${OUTPUT_DETAILS:-0}"
-CACHE_MODE="${CACHE_MODE:-warm}"
 TOTAL_GPUS_PER_NODE="${TOTAL_GPUS_PER_NODE:-8}"
 SERVER_EXTRA_ARGS="${SERVER_EXTRA_ARGS:-}"
 
@@ -167,6 +191,14 @@ DECODE_URL="${DECODE_URL:-http://127.0.0.1:30001}"
 ROUTER_HOST="${ROUTER_HOST:-0.0.0.0}"
 ROUTER_PORT="${ROUTER_PORT:-8000}"
 ROUTER_URL="${ROUTER_URL:-http://127.0.0.1:8000}"
+
+export SCRIPT_ROOT LOG_ROOT TMP_LOG_ROOT RUN_ID MODEL IMAGE IB_DEV
+export BACKENDS CASES DATASETS CONCURRENCY_VALUES REPS OUTPUT_DETAILS
+export TOTAL_GPUS_PER_NODE
+export SERVER_EXTRA_ARGS
+export PREFILL_HOST PREFILL_PORT PREFILL_URL
+export DECODE_HOST DECODE_PORT DECODE_URL
+export ROUTER_HOST ROUTER_PORT ROUTER_URL
 
 PREFILL_PID=""
 DECODE_PID=""
@@ -198,7 +230,17 @@ import sys
 def split_ints(name):
     return [int(x) for x in os.environ.get(name, "").split() if x]
 
+def prompt_count(concurrency):
+    mapping = {
+        2: 128,
+        8: 512,
+        32: 1024,
+        64: 1024,
+    }
+    return mapping.get(concurrency, concurrency * 32)
+
 out = sys.argv[1]
+concurrency_values = split_ints("CONCURRENCY_VALUES")
 data = {
     "run_id": os.environ.get("RUN_ID"),
     "backend": os.environ.get("BACKEND"),
@@ -218,11 +260,12 @@ data = {
     "prefill_gpu_range": os.environ.get("PREFILL_GPU_RANGE"),
     "decode_gpu_range": os.environ.get("DECODE_GPU_RANGE"),
     "total_gpus_per_node": int(os.environ.get("TOTAL_GPUS_PER_NODE", "8")),
-    "concurrency_values": split_ints("CONCURRENCY_VALUES"),
+    "concurrency_values": concurrency_values,
+    "prompt_count_by_concurrency": {
+        str(c): prompt_count(c) for c in concurrency_values
+    },
     "repetitions": int(os.environ.get("REPS", "0")),
-    "min_prompts": int(os.environ.get("MIN_PROMPTS", "0")),
-    "prompts_per_concurrency": int(os.environ.get("PROMPTS_PER_CONCURRENCY", "0")),
-    "cache_mode": os.environ.get("CACHE_MODE", "warm"),
+    "cache_policy": os.environ.get("CACHE_POLICY"),
     "output_details": os.environ.get("OUTPUT_DETAILS", "0") == "1",
 }
 with open(out, "w") as f:
@@ -371,6 +414,25 @@ flush_caches() {
   done
 }
 
+set_cache_policy_for_dataset() {
+  case "$DATASET" in
+    rand|sharegpt)
+      CACHE_POLICY="cold_each_rep"
+      ;;
+    radixcache)
+      CACHE_POLICY="warm_across_reps"
+      ;;
+    radixcache_cold)
+      CACHE_POLICY="cold_each_rep"
+      ;;
+    *)
+      echo "unknown dataset for cache policy: $DATASET" >&2
+      return 1
+      ;;
+  esac
+  export CACHE_POLICY
+}
+
 launch_prefill() {
   local dp_args=()
   if [ "$PREFILL_DP_SIZE" -gt 1 ]; then dp_args=(--enable-dp-attention); fi
@@ -434,7 +496,7 @@ dataset_args_for() {
     sharegpt)
       DATASET_ARGS=(--dataset-name sharegpt --sharegpt-output-len 1024 --num-prompts "$num_prompts")
       ;;
-    radixcache)
+    radixcache|radixcache_cold)
       local groups=1
       local limit="$num_prompts"
       if [ "$limit" -gt 64 ]; then limit=64; fi
@@ -454,11 +516,22 @@ dataset_args_for() {
   esac
 }
 
+num_prompts_for_concurrency() {
+  local max_conc="$1"
+  case "$max_conc" in
+    2) echo 128 ;;
+    8) echo 512 ;;
+    32) echo 1024 ;;
+    64) echo 1024 ;;
+    *) echo $((max_conc * 32)) ;;
+  esac
+}
+
 run_one_bench() {
   local max_conc="$1"
   local rep="$2"
-  local num_prompts=$((max_conc * PROMPTS_PER_CONCURRENCY))
-  if [ "$num_prompts" -lt "$MIN_PROMPTS" ]; then num_prompts="$MIN_PROMPTS"; fi
+  local num_prompts
+  num_prompts="$(num_prompts_for_concurrency "$max_conc")"
 
   dataset_args_for "$DATASET" "$num_prompts"
 
@@ -492,13 +565,15 @@ for BACKEND in $BACKENDS; do
     preflight_gpu_fit
     for DATASET in $DATASETS; do
       export DATASET
+      set_cache_policy_for_dataset
       prepare_batch_dirs
       write_fingerprint "$OUT_DIR/fingerprint.txt"
       env | sort > "$OUT_DIR/env.txt"
       write_json_meta "$OUT_DIR/run_meta.json"
       {
         echo "BACKEND=$BACKEND CASE_NAME=$CASE_NAME DATASET=$DATASET"
-        echo "CONCURRENCY_VALUES=$CONCURRENCY_VALUES REPS=$REPS CACHE_MODE=$CACHE_MODE"
+        echo "CONCURRENCY_VALUES=$CONCURRENCY_VALUES REPS=$REPS CACHE_POLICY=$CACHE_POLICY"
+        echo "PROMPT_COUNTS=c2:128 c8:512 c32:1024 c64:1024"
       } > "$OUT_DIR/commands.sh"
 
       PREFILL_PID=""; DECODE_PID=""; ROUTER_PID=""
@@ -511,9 +586,9 @@ for BACKEND in $BACKENDS; do
       capture_health "$OUT_DIR/health_before.json"
 
       for max_conc in $CONCURRENCY_VALUES; do
-        if [ "$CACHE_MODE" != "cold" ]; then flush_caches; fi
+        if [ "$CACHE_POLICY" = "warm_across_reps" ]; then flush_caches; fi
         for ((rep=1; rep<=REPS; rep++)); do
-          if [ "$CACHE_MODE" = "cold" ]; then flush_caches; fi
+          if [ "$CACHE_POLICY" = "cold_each_rep" ]; then flush_caches; fi
           run_one_bench "$max_conc" "$rep"
         done
       done
@@ -537,7 +612,7 @@ Create:
 cat > "$MY/logs/scripts/pd_bench/sbatch_pd_1node.sh" <<'BASH'
 #!/usr/bin/env bash
 #SBATCH -A network_research_advdev
-#SBATCH -p batch
+#SBATCH -p batch_short
 #SBATCH -N 1
 #SBATCH --gpus-per-node=8
 #SBATCH -t 02:00:00
@@ -549,10 +624,13 @@ set -euo pipefail
 : "${MY:?Set MY}"
 : "${HF_TOKEN:?Set HF_TOKEN}"
 
-IMAGE="$MY/sqshs/sglang_pd_transfer_united.sqsh"
+IMAGE="${IMAGE:-$MY/sqshs/sglang_pd_transfer_united.sqsh}"
+export IMAGE
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)_${SLURM_JOB_ID}}"
 HOST_RUN_DIR="$MY/logs/pd_bench/$RUN_ID"
 mkdir -p "$HOST_RUN_DIR"
+SLURM_STDOUT="slurm-${SLURM_JOB_NAME}-${SLURM_JOB_ID}.out"
+trap 'cp "$SLURM_STDOUT" "$HOST_RUN_DIR/sbatch_stdout.log" 2>/dev/null || true' EXIT
 
 srun \
   --container-image="$IMAGE" \
@@ -573,8 +651,6 @@ export IB_DEV=mlx5_0
 export LOG_ROOT=/logs/pd_bench
 export TMP_LOG_ROOT=/logs/pd_bench_tmp
 export SCRIPT_ROOT=/logs/scripts/pd_bench
-export MIN_PROMPTS=100
-export PROMPTS_PER_CONCURRENCY=10
 export PREFILL_HOST=0.0.0.0
 export PREFILL_PORT=30000
 export PREFILL_URL=http://127.0.0.1:30000
@@ -591,16 +667,14 @@ ENV
 source /logs/pd_bench/\$RUN_ID/pd_env.sh
 export BACKENDS=\"${BACKENDS:-nixl mooncake}\"
 export CASES=\"${CASES:-Ptp2_Dtp2_Pdp1_Ddp1 Ptp4_Dtp4_Pdp1_Ddp1 Ptp2_Dtp4_Pdp1_Ddp1 Ptp4_Dtp2_Pdp1_Ddp1}\"
-export DATASETS=\"${DATASETS:-rand sharegpt radixcache}\"
-export CONCURRENCY_VALUES=\"${CONCURRENCY_VALUES:-1 8 32}\"
+export DATASETS=\"${DATASETS:-rand sharegpt radixcache radixcache_cold}\"
+export CONCURRENCY_VALUES=\"${CONCURRENCY_VALUES:-2 8 32 64}\"
 export REPS=\"${REPS:-5}\"
 export OUTPUT_DETAILS=\"${OUTPUT_DETAILS:-0}\"
-export CACHE_MODE=\"${CACHE_MODE:-warm}\"
 export SERVER_EXTRA_ARGS=\"${SERVER_EXTRA_ARGS:-}\"
 bash /logs/scripts/pd_bench/run_pd_backend_matrix.sh
 "
 
-cp "slurm-${SLURM_JOB_NAME}-${SLURM_JOB_ID}.out" "$HOST_RUN_DIR/sbatch_stdout.log" 2>/dev/null || true
 BASH
 
 chmod +x "$MY/logs/scripts/pd_bench/sbatch_pd_1node.sh"
@@ -615,7 +689,7 @@ Phase 2 needs a dedicated two-node runner. Create this wrapper only after
 cat > "$MY/logs/scripts/pd_bench/sbatch_pd_2node_high_conc.sh" <<'BASH'
 #!/usr/bin/env bash
 #SBATCH -A network_research_advdev
-#SBATCH -p batch
+#SBATCH -p batch_short
 #SBATCH -N 2
 #SBATCH --gpus-per-node=8
 #SBATCH -t 02:00:00
@@ -632,10 +706,13 @@ if [ ! -x "$MY/logs/scripts/pd_bench/run_pd_backend_matrix_2node.sh" ]; then
   exit 1
 fi
 
-IMAGE="$MY/sqshs/sglang_pd_transfer_united.sqsh"
+IMAGE="${IMAGE:-$MY/sqshs/sglang_pd_transfer_united.sqsh}"
+export IMAGE
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)_${SLURM_JOB_ID}}"
 HOST_RUN_DIR="$MY/logs/pd_bench/$RUN_ID"
 mkdir -p "$HOST_RUN_DIR"
+SLURM_STDOUT="slurm-${SLURM_JOB_NAME}-${SLURM_JOB_ID}.out"
+trap 'cp "$SLURM_STDOUT" "$HOST_RUN_DIR/sbatch_stdout.log" 2>/dev/null || true' EXIT
 
 srun \
   --container-image="$IMAGE" \
@@ -656,11 +733,9 @@ export DATASETS=\"${DATASETS:-rand sharegpt radixcache}\"
 export CONCURRENCY_VALUES=\"${CONCURRENCY_VALUES:-64 128 256}\"
 export REPS=\"${REPS:-5}\"
 export OUTPUT_DETAILS=\"${OUTPUT_DETAILS:-0}\"
-export CACHE_MODE=\"${CACHE_MODE:-warm}\"
 bash /logs/scripts/pd_bench/run_pd_backend_matrix_2node.sh
 "
 
-cp "slurm-${SLURM_JOB_NAME}-${SLURM_JOB_ID}.out" "$HOST_RUN_DIR/sbatch_stdout.log" 2>/dev/null || true
 BASH
 
 chmod +x "$MY/logs/scripts/pd_bench/sbatch_pd_2node_high_conc.sh"
@@ -689,13 +764,13 @@ Inside the container:
 export PYTHONPATH=/sgl-workspace/sglang/python:${PYTHONPATH:-}
 export HF_TOKEN=<HF_TOKEN>
 export RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)_smoke"
+export IMAGE="$MY/sqshs/sglang_pd_transfer_united.sqsh"
 export BACKENDS="nixl mooncake"
 export CASES="Ptp2_Dtp2_Pdp1_Ddp1"
 export DATASETS="rand"
-export CONCURRENCY_VALUES="1 8 32"
+export CONCURRENCY_VALUES="2 8 32 64"
 export REPS=1
 export OUTPUT_DETAILS=1
-export CACHE_MODE=warm
 export SERVER_EXTRA_ARGS="--attention-backend triton --mem-fraction-static 0.60 --chunked-prefill-size 2048"
 bash /logs/scripts/pd_bench/run_pd_backend_matrix.sh
 ```
@@ -709,57 +784,69 @@ RUN_ID=llama_phase0_smoke \
 BACKENDS="nixl mooncake" \
 CASES="Ptp2_Dtp2_Pdp1_Ddp1" \
 DATASETS="rand" \
-CONCURRENCY_VALUES="1 8 32" \
+CONCURRENCY_VALUES="2 8 32 64" \
 REPS=1 \
 OUTPUT_DETAILS=1 \
+KEEP_SUCCESS_LOGS=1 \
 SERVER_EXTRA_ARGS="--attention-backend triton --mem-fraction-static 0.60 --chunked-prefill-size 2048" \
 sbatch "$MY/logs/scripts/pd_bench/sbatch_pd_1node.sh"
 ```
 
-Phase 1 shard A:
+Cache policy is dataset-derived in `run_pd_backend_matrix.sh`:
+
+```text
+rand            -> flush before every rep
+sharegpt        -> flush before every rep
+radixcache      -> flush once per concurrency, keep cache warm across reps
+radixcache_cold -> flush before every rep
+```
+
+Phase 1 full 16-job submission:
 
 ```bash
-RUN_ID=llama_phase1_a \
-BACKENDS="nixl mooncake" \
-CASES="Ptp2_Dtp2_Pdp1_Ddp1 Ptp2_Dtp4_Pdp1_Ddp1" \
-DATASETS="rand sharegpt radixcache" \
-CONCURRENCY_VALUES="1 8 32" \
-REPS=5 \
-OUTPUT_DETAILS=0 \
-CACHE_MODE=warm \
-SERVER_EXTRA_ARGS="--attention-backend triton --mem-fraction-static 0.60 --chunked-prefill-size 2048" \
-sbatch "$MY/logs/scripts/pd_bench/sbatch_pd_1node.sh"
+shard_idx=0
+for case_name in \
+  Ptp2_Dtp2_Pdp1_Ddp1 \
+  Ptp4_Dtp4_Pdp1_Ddp1 \
+  Ptp2_Dtp4_Pdp1_Ddp1 \
+  Ptp4_Dtp2_Pdp1_Ddp1
+do
+  for dataset in rand sharegpt radixcache radixcache_cold; do
+    if [ $((shard_idx % 2)) -eq 0 ]; then
+      backend_order="nixl mooncake"
+    else
+      backend_order="mooncake nixl"
+    fi
+
+    RUN_ID="llama_phase1_${case_name}_${dataset}" \
+    BACKENDS="$backend_order" \
+    CASES="$case_name" \
+    DATASETS="$dataset" \
+    CONCURRENCY_VALUES="2 8 32 64" \
+    REPS=5 \
+    OUTPUT_DETAILS=0 \
+    SERVER_EXTRA_ARGS="--attention-backend triton --mem-fraction-static 0.60 --chunked-prefill-size 2048" \
+    sbatch "$MY/logs/scripts/pd_bench/sbatch_pd_1node.sh"
+
+    shard_idx=$((shard_idx + 1))
+  done
+done
 ```
 
-Phase 1 shard B:
+This submits:
 
-```bash
-RUN_ID=llama_phase1_b \
-BACKENDS="mooncake nixl" \
-CASES="Ptp4_Dtp4_Pdp1_Ddp1 Ptp4_Dtp2_Pdp1_Ddp1" \
-DATASETS="rand sharegpt radixcache" \
-CONCURRENCY_VALUES="1 8 32" \
-REPS=5 \
-OUTPUT_DETAILS=0 \
-CACHE_MODE=warm \
-SERVER_EXTRA_ARGS="--attention-backend triton --mem-fraction-static 0.60 --chunked-prefill-size 2048" \
-sbatch "$MY/logs/scripts/pd_bench/sbatch_pd_1node.sh"
+```text
+4 cases x 4 datasets = 16 sbatch jobs
 ```
 
-Cold radix transfer-cost point:
+The submitted shard backend order alternates as:
 
-```bash
-RUN_ID=llama_phase1_radix_cold \
-BACKENDS="nixl mooncake" \
-CASES="Ptp2_Dtp2_Pdp1_Ddp1" \
-DATASETS="radixcache" \
-CONCURRENCY_VALUES="32" \
-REPS=5 \
-OUTPUT_DETAILS=0 \
-CACHE_MODE=cold \
-SERVER_EXTRA_ARGS="--attention-backend triton --mem-fraction-static 0.60 --chunked-prefill-size 2048" \
-sbatch "$MY/logs/scripts/pd_bench/sbatch_pd_1node.sh"
+```text
+nixl -> mooncake -> mooncake -> nixl -> nixl -> mooncake ...
 ```
+
+Keep your cluster's active-job limit in mind. If you want to cap active jobs at
+10, submit the loop in waves or pause after every 10 submissions.
 
 Phase 2 examples, after the two-node runner is ready:
 
@@ -771,7 +858,6 @@ DATASETS="rand sharegpt radixcache" \
 CONCURRENCY_VALUES="64 128 256" \
 REPS=5 \
 OUTPUT_DETAILS=0 \
-CACHE_MODE=warm \
 SERVER_EXTRA_ARGS="--attention-backend triton --mem-fraction-static 0.60 --chunked-prefill-size 2048" \
 sbatch "$MY/logs/scripts/pd_bench/sbatch_pd_2node_high_conc.sh"
 ```
@@ -784,7 +870,6 @@ DATASETS="rand sharegpt radixcache" \
 CONCURRENCY_VALUES="64 128 256" \
 REPS=5 \
 OUTPUT_DETAILS=0 \
-CACHE_MODE=warm \
 SERVER_EXTRA_ARGS="--attention-backend triton --mem-fraction-static 0.60 --chunked-prefill-size 2048" \
 sbatch "$MY/logs/scripts/pd_bench/sbatch_pd_2node_high_conc.sh"
 ```
@@ -819,7 +904,7 @@ single backend/case can pass PD warmup without this flag.
 For a failed batch:
 
 ```bash
-find "$MY/logs/pd_bench/<run_id>" -path '*failed_server_logs*' -type f -maxdepth 8
+find "$MY/logs/pd_bench/<run_id>" -maxdepth 8 -path '*failed_server_logs*' -type f
 ```
 
 Common files:
@@ -852,9 +937,11 @@ Phase 0 is successful when:
 
 Phase 1 is successful when:
 
-- Both shard jobs complete.
+- All 16 case/dataset shard jobs complete.
 - Every `backend x case x dataset x concurrency` has 5 JSONL files.
-- `CACHE_MODE` and `OUTPUT_DETAILS` are recorded in `run_meta.json`.
+- Phase 1 coverage is `2 backends x 4 cases x 4 datasets x 4 concurrencies x 5 reps = 640` JSONL result files.
+- `cache_policy` and `output_details` are recorded in `run_meta.json`.
+- `prompt_count_by_concurrency` is recorded in `run_meta.json`.
 - Temporary server logs are removed, unless `KEEP_SUCCESS_LOGS=1`.
 
 Phase 2 is successful when:

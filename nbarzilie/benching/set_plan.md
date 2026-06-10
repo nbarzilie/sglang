@@ -722,6 +722,7 @@ Template:
 ```bash
 export HF_TOKEN=<HF_TOKEN>
 export MODEL=meta-llama/Llama-3.1-8B-Instruct
+export IMAGE=$MY/sqshs/sglang_pd_transfer_united.sqsh
 export IB_DEV=mlx5_0
 export LOG_ROOT=/logs/pd_bench
 export TMP_LOG_ROOT=/logs/pd_bench_tmp
@@ -1150,6 +1151,7 @@ set -euo pipefail
 export PYTHONPATH=/sgl-workspace/sglang/python:\${PYTHONPATH:-}
 export HF_TOKEN='$HF_TOKEN'
 export RUN_ID='$RUN_ID'
+export IMAGE='$IMAGE'
 export LOG_ROOT=/logs/pd_bench
 mkdir -p /logs/pd_bench/\$RUN_ID
 
