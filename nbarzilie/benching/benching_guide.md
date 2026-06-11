@@ -9,7 +9,8 @@ This guide assumes:
   `BACKEND=mooncake`.
 - You can run at least 10 active Slurm jobs.
 - Each job is limited to 2 hours.
-- Each node has 8 GPUs.
+- Each node has up to 8 GPUs. One-node jobs should request exactly the number
+  of GPUs used by the selected case, not the full node.
 
 The guide covers missions 2, 3, and 4 from `set_plan.md`: fingerprints and log
 layout, automated benchmark phases, and `srun`/`sbatch` execution.
@@ -51,7 +52,17 @@ Phase 1 shard count:
 Each Phase 1 job should run exactly one case and one dataset, with both
 backends, all four concurrency points, and five reps. This keeps backend
 comparison inside the same Slurm allocation while staying under the 2-hour job
-limit.
+limit. It also lets each sbatch job request the exact number of GPUs used by
+that one case, avoiding idle allocated GPUs.
+
+Per-case one-node GPU requests:
+
+```text
+Ptp2_Dtp2_Pdp1_Ddp1 -> 4 GPUs
+Ptp4_Dtp4_Pdp1_Ddp1 -> 8 GPUs
+Ptp2_Dtp4_Pdp1_Ddp1 -> 6 GPUs
+Ptp4_Dtp2_Pdp1_Ddp1 -> 6 GPUs
+```
 
 Request counts are fixed by concurrency:
 
@@ -79,6 +90,13 @@ reps: 5
 
 Run Phase 2 only after Phase 1 has complete JSONL files, clean fingerprints, and
 no recurring server launch failures.
+
+Phase 2 note: the placeholder two-node wrapper no longer hardcodes 8 GPUs per
+node. The final two-node runner must still solve exact GPU allocation for
+asymmetric cases. A symmetric Slurm request such as `--gpus-per-node=4` can
+still leave idle GPUs on the prefill node for `Ptp2_Dtp4_Pdp1_Ddp1`. Do not run
+Phase 2 until the dedicated two-node runner can request/place GPUs without idle
+allocations, or until the cluster admin accepts the symmetric allocation.
 
 DP attention note: current smoke failures show SGLang crashing during PD prefill
 warmup with `dp_size=2` and `enable_dp_attention=True`. Until that is fixed,
@@ -179,7 +197,7 @@ DATASETS="${DATASETS:-rand sharegpt radixcache radixcache_cold}"
 CONCURRENCY_VALUES="${CONCURRENCY_VALUES:-2 8 32 64}"
 REPS="${REPS:-5}"
 OUTPUT_DETAILS="${OUTPUT_DETAILS:-0}"
-TOTAL_GPUS_PER_NODE="${TOTAL_GPUS_PER_NODE:-8}"
+TOTAL_GPUS_PER_NODE="${TOTAL_GPUS_PER_NODE:-${GPUS_PER_NODE:-8}}"
 SERVER_EXTRA_ARGS="${SERVER_EXTRA_ARGS:-}"
 
 PREFILL_HOST="${PREFILL_HOST:-0.0.0.0}"
@@ -194,7 +212,7 @@ ROUTER_URL="${ROUTER_URL:-http://127.0.0.1:8000}"
 
 export SCRIPT_ROOT LOG_ROOT TMP_LOG_ROOT RUN_ID MODEL IMAGE IB_DEV
 export BACKENDS CASES DATASETS CONCURRENCY_VALUES REPS OUTPUT_DETAILS
-export TOTAL_GPUS_PER_NODE
+export TOTAL_GPUS_PER_NODE GPUS_PER_NODE
 export SERVER_EXTRA_ARGS
 export PREFILL_HOST PREFILL_PORT PREFILL_URL
 export DECODE_HOST DECODE_PORT DECODE_URL
@@ -614,7 +632,6 @@ cat > "$MY/logs/scripts/pd_bench/sbatch_pd_1node.sh" <<'BASH'
 #SBATCH -A network_research_advdev
 #SBATCH -p batch_short
 #SBATCH -N 1
-#SBATCH --gpus-per-node=8
 #SBATCH -t 02:00:00
 #SBATCH -J pdbench1
 #SBATCH -o slurm-%x-%j.out
@@ -623,9 +640,11 @@ set -euo pipefail
 
 : "${MY:?Set MY}"
 : "${HF_TOKEN:?Set HF_TOKEN}"
+: "${GPUS_PER_NODE:?Set GPUS_PER_NODE and submit with sbatch --gpus-per-node=\$GPUS_PER_NODE}"
 
 IMAGE="${IMAGE:-$MY/sqshs/sglang_pd_transfer_united.sqsh}"
 export IMAGE
+export GPUS_PER_NODE
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)_${SLURM_JOB_ID}}"
 HOST_RUN_DIR="$MY/logs/pd_bench/$RUN_ID"
 mkdir -p "$HOST_RUN_DIR"
@@ -642,6 +661,8 @@ export PYTHONPATH=/sgl-workspace/sglang/python:\${PYTHONPATH:-}
 export HF_TOKEN='$HF_TOKEN'
 export RUN_ID='$RUN_ID'
 export IMAGE='$IMAGE'
+export GPUS_PER_NODE='$GPUS_PER_NODE'
+export TOTAL_GPUS_PER_NODE='$GPUS_PER_NODE'
 export LOG_ROOT=/logs/pd_bench
 mkdir -p /logs/pd_bench/\$RUN_ID
 
@@ -691,7 +712,6 @@ cat > "$MY/logs/scripts/pd_bench/sbatch_pd_2node_high_conc.sh" <<'BASH'
 #SBATCH -A network_research_advdev
 #SBATCH -p batch_short
 #SBATCH -N 2
-#SBATCH --gpus-per-node=8
 #SBATCH -t 02:00:00
 #SBATCH -J pdbench2
 #SBATCH -o slurm-%x-%j.out
@@ -700,6 +720,7 @@ set -euo pipefail
 
 : "${MY:?Set MY}"
 : "${HF_TOKEN:?Set HF_TOKEN}"
+: "${GPUS_PER_NODE:?Set GPUS_PER_NODE and submit with sbatch --gpus-per-node=\$GPUS_PER_NODE}"
 
 if [ ! -x "$MY/logs/scripts/pd_bench/run_pd_backend_matrix_2node.sh" ]; then
   echo "run_pd_backend_matrix_2node.sh is required before Phase 2" >&2
@@ -708,6 +729,7 @@ fi
 
 IMAGE="${IMAGE:-$MY/sqshs/sglang_pd_transfer_united.sqsh}"
 export IMAGE
+export GPUS_PER_NODE
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)_${SLURM_JOB_ID}}"
 HOST_RUN_DIR="$MY/logs/pd_bench/$RUN_ID"
 mkdir -p "$HOST_RUN_DIR"
@@ -724,6 +746,8 @@ export PYTHONPATH=/sgl-workspace/sglang/python:\${PYTHONPATH:-}
 export HF_TOKEN='$HF_TOKEN'
 export RUN_ID='$RUN_ID'
 export IMAGE='$IMAGE'
+export GPUS_PER_NODE='$GPUS_PER_NODE'
+export TOTAL_GPUS_PER_NODE='$GPUS_PER_NODE'
 export LOG_ROOT=/logs/pd_bench
 export TMP_LOG_ROOT=/logs/pd_bench_tmp
 export SCRIPT_ROOT=/logs/scripts/pd_bench
@@ -751,7 +775,7 @@ srun \
   -t 02:00:00 \
   -N 1 \
   -p interactive \
-  --gpus-per-node=8 \
+  --gpus-per-node=4 \
   --container-image="$MY/sqshs/sglang_pd_transfer_united.sqsh" \
   --container-workdir=/sgl-workspace/sglang \
   --container-mounts="$MY/.cache/huggingface:/root/.cache/huggingface,$MY/logs:/logs,$MY:/host_my" \
@@ -765,6 +789,7 @@ export PYTHONPATH=/sgl-workspace/sglang/python:${PYTHONPATH:-}
 export HF_TOKEN=<HF_TOKEN>
 export RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)_smoke"
 export IMAGE="$MY/sqshs/sglang_pd_transfer_united.sqsh"
+export GPUS_PER_NODE=4
 export BACKENDS="nixl mooncake"
 export CASES="Ptp2_Dtp2_Pdp1_Ddp1"
 export DATASETS="rand"
@@ -781,6 +806,7 @@ Phase 0:
 
 ```bash
 RUN_ID=llama_phase0_smoke \
+GPUS_PER_NODE=4 \
 BACKENDS="nixl mooncake" \
 CASES="Ptp2_Dtp2_Pdp1_Ddp1" \
 DATASETS="rand" \
@@ -789,7 +815,7 @@ REPS=1 \
 OUTPUT_DETAILS=1 \
 KEEP_SUCCESS_LOGS=1 \
 SERVER_EXTRA_ARGS="--attention-backend triton --mem-fraction-static 0.60 --chunked-prefill-size 2048" \
-sbatch "$MY/logs/scripts/pd_bench/sbatch_pd_1node.sh"
+sbatch --gpus-per-node=4 "$MY/logs/scripts/pd_bench/sbatch_pd_1node.sh"
 ```
 
 Cache policy is dataset-derived in `run_pd_backend_matrix.sh`:
@@ -811,6 +837,14 @@ for case_name in \
   Ptp2_Dtp4_Pdp1_Ddp1 \
   Ptp4_Dtp2_Pdp1_Ddp1
 do
+  case "$case_name" in
+    Ptp2_Dtp2_Pdp1_Ddp1) gpus_per_node=4 ;;
+    Ptp4_Dtp4_Pdp1_Ddp1) gpus_per_node=8 ;;
+    Ptp2_Dtp4_Pdp1_Ddp1) gpus_per_node=6 ;;
+    Ptp4_Dtp2_Pdp1_Ddp1) gpus_per_node=6 ;;
+    *) echo "unknown case: $case_name" >&2; exit 1 ;;
+  esac
+
   for dataset in rand sharegpt radixcache radixcache_cold; do
     if [ $((shard_idx % 2)) -eq 0 ]; then
       backend_order="nixl mooncake"
@@ -819,6 +853,7 @@ do
     fi
 
     RUN_ID="llama_phase1_${case_name}_${dataset}" \
+    GPUS_PER_NODE="$gpus_per_node" \
     BACKENDS="$backend_order" \
     CASES="$case_name" \
     DATASETS="$dataset" \
@@ -826,7 +861,7 @@ do
     REPS=5 \
     OUTPUT_DETAILS=0 \
     SERVER_EXTRA_ARGS="--attention-backend triton --mem-fraction-static 0.60 --chunked-prefill-size 2048" \
-    sbatch "$MY/logs/scripts/pd_bench/sbatch_pd_1node.sh"
+    sbatch --gpus-per-node="$gpus_per_node" "$MY/logs/scripts/pd_bench/sbatch_pd_1node.sh"
 
     shard_idx=$((shard_idx + 1))
   done
@@ -852,6 +887,7 @@ Phase 2 examples, after the two-node runner is ready:
 
 ```bash
 RUN_ID=llama_phase2_a \
+GPUS_PER_NODE=4 \
 BACKENDS="nixl mooncake" \
 CASES="Ptp2_Dtp2_Pdp1_Ddp1 Ptp2_Dtp4_Pdp1_Ddp1" \
 DATASETS="rand sharegpt radixcache" \
@@ -859,11 +895,12 @@ CONCURRENCY_VALUES="64 128 256" \
 REPS=5 \
 OUTPUT_DETAILS=0 \
 SERVER_EXTRA_ARGS="--attention-backend triton --mem-fraction-static 0.60 --chunked-prefill-size 2048" \
-sbatch "$MY/logs/scripts/pd_bench/sbatch_pd_2node_high_conc.sh"
+sbatch --gpus-per-node=4 "$MY/logs/scripts/pd_bench/sbatch_pd_2node_high_conc.sh"
 ```
 
 ```bash
 RUN_ID=llama_phase2_b \
+GPUS_PER_NODE=4 \
 BACKENDS="mooncake nixl" \
 CASES="Ptp4_Dtp4_Pdp1_Ddp1 Ptp4_Dtp2_Pdp1_Ddp1" \
 DATASETS="rand sharegpt radixcache" \
@@ -871,7 +908,7 @@ CONCURRENCY_VALUES="64 128 256" \
 REPS=5 \
 OUTPUT_DETAILS=0 \
 SERVER_EXTRA_ARGS="--attention-backend triton --mem-fraction-static 0.60 --chunked-prefill-size 2048" \
-sbatch "$MY/logs/scripts/pd_bench/sbatch_pd_2node_high_conc.sh"
+sbatch --gpus-per-node=4 "$MY/logs/scripts/pd_bench/sbatch_pd_2node_high_conc.sh"
 ```
 
 ## Known Startup Failure: FlashAttention KV View
@@ -930,8 +967,9 @@ find "$MY/logs/pd_bench/<run_id>" -name '*.jsonl' -size +0
 
 Phase 0 is successful when:
 
-- Both backends complete all three smoke concurrency points.
+- Both backends complete all four smoke concurrency points.
 - Each backend/case/dataset has `run_meta.json` and `fingerprint.txt`.
+- The smoke job requests 4 GPUs for `Ptp2_Dtp2_Pdp1_Ddp1`, not 8.
 - JSONL files are non-empty.
 - No `failed_server_logs/` directory is present.
 
@@ -940,6 +978,7 @@ Phase 1 is successful when:
 - All 16 case/dataset shard jobs complete.
 - Every `backend x case x dataset x concurrency` has 5 JSONL files.
 - Phase 1 coverage is `2 backends x 4 cases x 4 datasets x 4 concurrencies x 5 reps = 640` JSONL result files.
+- Every shard requests the per-case GPU count: 4, 6, or 8 GPUs.
 - `cache_policy` and `output_details` are recorded in `run_meta.json`.
 - `prompt_count_by_concurrency` is recorded in `run_meta.json`.
 - Temporary server logs are removed, unless `KEEP_SUCCESS_LOGS=1`.
