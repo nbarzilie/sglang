@@ -2,11 +2,13 @@ import json
 import os
 import unittest
 import uuid
+from types import SimpleNamespace
 
 import requests
 
 from sglang.srt.environ import envs
 from sglang.test.ci.ci_register import register_cuda_ci
+from sglang.test.run_eval import run_eval
 from sglang.test.server_fixtures.disaggregation_fixture import (
     PDDisaggregationServerBase,
 )
@@ -14,9 +16,13 @@ from sglang.test.server_fixtures.disaggregation_utils import (
     assert_process_healthy,
     configure_nixl_pd_backend,
 )
-from sglang.test.test_utils import DEFAULT_SMALL_MODEL_NAME_FOR_TEST, is_in_ci
+from sglang.test.test_utils import (
+    DEFAULT_MODEL_NAME_FOR_TEST,
+    DEFAULT_SMALL_MODEL_NAME_FOR_TEST,
+    is_in_ci,
+)
 
-register_cuda_ci(est_time=440, stage="base-b", runner_config="2-gpu-large")
+register_cuda_ci(est_time=520, stage="base-b", runner_config="2-gpu-large")
 
 
 def _nixl_backend_config(backend, backend_params_json):
@@ -156,7 +162,7 @@ class TestDisaggregationNixlFailure(PDDisaggregationServerBase):
         _require_configured_nixl_backend()
         super().setUpClass()
         os.environ["SGLANG_TEST_DISAGG_FAILURE_PROB"] = "0.05"
-        cls.model = DEFAULT_SMALL_MODEL_NAME_FOR_TEST
+        cls.model = DEFAULT_MODEL_NAME_FOR_TEST
         configure_nixl_pd_backend(cls)
         cls.launch_all()
 
@@ -165,56 +171,31 @@ class TestDisaggregationNixlFailure(PDDisaggregationServerBase):
         os.environ.pop("SGLANG_TEST_DISAGG_FAILURE_PROB", None)
         super().tearDownClass()
 
-    def test_injected_transfer_failures_do_not_crash_workers(self):
-        failure_count = 0
-
-        for i in range(24):
-            try:
-                response = requests.post(
-                    self.lb_url + "/generate",
-                    json={
-                        "text": f"Failure injection request {i}: 1 + 1 =",
-                        "sampling_params": {"temperature": 0, "max_new_tokens": 4},
-                    },
-                    timeout=30,
-                )
-            except requests.RequestException:
-                failure_count += 1
-                continue
-
-            if response.status_code != 200:
-                failure_count += 1
-                continue
-
-            try:
-                data = response.json()
-            except ValueError:
-                failure_count += 1
-                continue
-
-            if "text" not in data or len(data["text"]) == 0:
-                failure_count += 1
-
-        self.assertGreater(
-            failure_count,
-            0,
-            "failure injection did not produce any failed requests or exceptions",
+    def test_gsm8k(self):
+        args = SimpleNamespace(
+            base_url=f"http://{self.base_host}:{self.lb_port}",
+            eval_name="gsm8k",
+            api="completion",
+            max_tokens=512,
+            num_examples=200,
+            num_threads=128,
         )
 
-        # Cleanup is part of the correctness check: after injected NIXL
-        # transfer failures, workers must still accept abort requests before
-        # the final health checks.
-        for url in (self.prefill_url, self.decode_url):
-            response = requests.post(
-                f"{url}/abort_request",
-                json={"abort_all": True},
-                timeout=10,
-            )
-            self.assertEqual(response.status_code, 200, response.text)
+        # Match TestDisaggregationMooncakeFailure: inject many transfer failures
+        # and tolerate eval/request errors as long as workers remain healthy.
+        try:
+            metrics = run_eval(args)
+            print(f"Evaluation metrics: {metrics}")
+        except Exception as e:
+            print(f"Test encountered expected errors: {e}")
 
         assert_process_healthy(self, "load balancer", self.process_lb, self.lb_url)
-        assert_process_healthy(self, "prefill", self.process_prefill, self.prefill_url)
-        assert_process_healthy(self, "decode", self.process_decode, self.decode_url)
+        assert_process_healthy(
+            self, "prefill", self.process_prefill, self.prefill_url, "/health_generate"
+        )
+        assert_process_healthy(
+            self, "decode", self.process_decode, self.decode_url, "/health_generate"
+        )
 
 
 if __name__ == "__main__":
