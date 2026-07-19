@@ -115,6 +115,7 @@ class NixlPDDisaggregationServerBase(PDDisaggregationServerBase):
     prefill_tp_size = NIXL_PREFILL_TP_SIZE
     decode_tp_size = NIXL_DECODE_TP_SIZE
     decode_base_gpu_id = NIXL_DECODE_BASE_GPU_ID
+    extra_decode_args = ["--mem-fraction-static", "0.92"]
 
     @classmethod
     def start_prefill(cls):
