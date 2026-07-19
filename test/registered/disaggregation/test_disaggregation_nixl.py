@@ -75,9 +75,7 @@ def _nixl_ucx_backend_env(num_threads):
         envs.SGLANG_DISAGGREGATION_NIXL_BACKEND_PARAMS.get(),
         ucx_num_threads=num_threads,
     )
-    return {
-        "SGLANG_DISAGGREGATION_NIXL_BACKEND_PARAMS": json.dumps(backend_params)
-    }
+    return {"SGLANG_DISAGGREGATION_NIXL_BACKEND_PARAMS": json.dumps(backend_params)}
 
 
 def _get_configured_nixl_backend_probe_error():
@@ -95,9 +93,7 @@ def _get_configured_nixl_backend_probe_error():
         return str(e)
 
     try:
-        probe_num_threads = (
-            NIXL_PREFILL_UCX_NUM_THREADS if backend == "UCX" else 8
-        )
+        probe_num_threads = NIXL_PREFILL_UCX_NUM_THREADS if backend == "UCX" else 8
         agent_config = nixl_agent_config(
             backends=[],
             num_threads=probe_num_threads,
