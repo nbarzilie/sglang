@@ -1,5 +1,9 @@
 import json
 import os
+import shlex
+import shutil
+import subprocess
+import threading
 import unittest
 import uuid
 from types import SimpleNamespace
@@ -28,6 +32,11 @@ register_cuda_ci(est_time=700, stage="base-c", runner_config="8-gpu-h20")
 NIXL_PREFILL_TP_SIZE = 4
 NIXL_DECODE_TP_SIZE = 4
 NIXL_DECODE_BASE_GPU_ID = 4
+NIXL_PREFILL_UCX_NUM_THREADS = 8
+NIXL_ACCURACY_PREFILL_UCX_NUM_THREADS = 16
+NIXL_FAILURE_PREFILL_UCX_NUM_THREADS = 32
+NIXL_DECODE_UCX_NUM_THREADS = 0
+HCA_MONITOR_INTERVAL_SECONDS = 10
 
 # This is a PD transfer functional gate, not the standalone model-quality gate.
 # The standalone Llama-3.1-8B GSM8K threshold is 0.80, while existing PD
@@ -36,7 +45,144 @@ NIXL_DECODE_BASE_GPU_ID = 4
 NIXL_GSM8K_SCORE_THRESHOLD = 0.62
 
 
-def _nixl_backend_config(backend, backend_params_json):
+def _hca_monitor_enabled():
+    return os.getenv("SGLANG_TEST_DISABLE_HCA_MONITOR") != "1" and any(
+        shutil.which(cmd) for cmd in ("rdma", "ibv_devices", "ibv_devinfo")
+    )
+
+
+def _get_hca_monitor_interval_seconds():
+    try:
+        return max(
+            1,
+            int(
+                os.getenv(
+                    "SGLANG_TEST_HCA_MONITOR_INTERVAL_SECONDS",
+                    str(HCA_MONITOR_INTERVAL_SECONDS),
+                )
+            ),
+        )
+    except ValueError:
+        return HCA_MONITOR_INTERVAL_SECONDS
+
+
+def _run_hca_command(command, timeout=5):
+    try:
+        completed = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except FileNotFoundError:
+        return f"{command[0]} not found"
+    except subprocess.TimeoutExpired:
+        return f"{shlex.join(command)} timed out after {timeout}s"
+
+    output = completed.stdout.strip()
+    if completed.returncode != 0:
+        return f"exit={completed.returncode}\n{output}"
+    return output or "<no output>"
+
+
+def _read_text_file(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError as e:
+        return f"<unavailable: {e}>"
+
+
+def _print_hca_inventory():
+    print("=== HCA inventory ===", flush=True)
+    for command in (["ibv_devices"], ["ibv_devinfo", "-l"]):
+        if shutil.which(command[0]):
+            print(f"$ {shlex.join(command)}", flush=True)
+            print(_run_hca_command(command), flush=True)
+
+    infiniband_root = "/sys/class/infiniband"
+    try:
+        devices = sorted(os.listdir(infiniband_root))
+    except OSError as e:
+        print(f"{infiniband_root} unavailable: {e}", flush=True)
+        return
+
+    for device in devices:
+        root = os.path.join(infiniband_root, device)
+        fields = {
+            "node_desc": os.path.join(root, "node_desc"),
+            "fw_ver": os.path.join(root, "fw_ver"),
+            "vendor": os.path.join(root, "device", "vendor"),
+            "device": os.path.join(root, "device", "device"),
+        }
+        print(f"== {device} ==", flush=True)
+        for name, path in fields.items():
+            print(f"{name}: {_read_text_file(path)}", flush=True)
+
+
+def _print_hca_resource_snapshot(label):
+    print(f"=== HCA resource snapshot: {label} ===", flush=True)
+    if not shutil.which("rdma"):
+        print("rdma command not found; skipping resource snapshot.", flush=True)
+        return
+
+    for command in (
+        ["rdma", "resource", "show"],
+        ["rdma", "resource", "show", "qp"],
+        ["rdma", "resource", "show", "cq"],
+        ["rdma", "resource", "show", "mr"],
+    ):
+        print(f"$ {shlex.join(command)}", flush=True)
+        print(_run_hca_command(command), flush=True)
+
+
+class _HcaResourceMonitor:
+    def __init__(self, label, interval_seconds=None):
+        self.label = label
+        self.interval_seconds = interval_seconds or _get_hca_monitor_interval_seconds()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"hca-resource-monitor-{label}",
+            daemon=True,
+        )
+
+    def start(self):
+        if not _hca_monitor_enabled():
+            print(
+                "HCA resource monitor disabled or rdma/ibv tools unavailable.",
+                flush=True,
+            )
+            return
+        _print_hca_inventory()
+        _print_hca_resource_snapshot(f"{self.label}: start")
+        self._thread.start()
+
+    def stop(self):
+        if not self._thread.is_alive():
+            return
+        self._stop.set()
+        self._thread.join(timeout=self.interval_seconds + 1)
+        _print_hca_resource_snapshot(f"{self.label}: stop")
+
+    def snapshot(self, label):
+        if _hca_monitor_enabled():
+            _print_hca_resource_snapshot(f"{self.label}: {label}")
+
+    def _run(self):
+        iteration = 0
+        while not self._stop.wait(self.interval_seconds):
+            iteration += 1
+            _print_hca_resource_snapshot(f"{self.label}: periodic {iteration}")
+
+
+def _nixl_backend_config(
+    backend,
+    backend_params_json,
+    ucx_num_threads=NIXL_PREFILL_UCX_NUM_THREADS,
+):
     backend_params = json.loads(backend_params_json)
     if not isinstance(backend_params, dict) or not all(
         isinstance(key, str) and isinstance(value, str)
@@ -47,7 +193,9 @@ def _nixl_backend_config(backend, backend_params_json):
             "with string keys and string values"
         )
 
-    if backend == "UCX" or backend == "OBJ":
+    if backend == "UCX":
+        backend_params["num_threads"] = str(ucx_num_threads)
+    elif backend == "OBJ":
         backend_params.setdefault("num_threads", "8")
     elif backend == "GDS_MT":
         backend_params.setdefault("thread_count", "8")
@@ -55,6 +203,21 @@ def _nixl_backend_config(backend, backend_params_json):
         backend_params.setdefault("num_cpus", "8")
 
     return backend, backend_params
+
+
+def _nixl_ucx_backend_env(num_threads):
+    backend = envs.SGLANG_DISAGGREGATION_NIXL_BACKEND.get()
+    if backend != "UCX":
+        return {}
+
+    _, backend_params = _nixl_backend_config(
+        backend,
+        envs.SGLANG_DISAGGREGATION_NIXL_BACKEND_PARAMS.get(),
+        ucx_num_threads=num_threads,
+    )
+    return {
+        "SGLANG_DISAGGREGATION_NIXL_BACKEND_PARAMS": json.dumps(backend_params)
+    }
 
 
 def _get_configured_nixl_backend_probe_error():
@@ -72,9 +235,12 @@ def _get_configured_nixl_backend_probe_error():
         return str(e)
 
     try:
+        probe_num_threads = (
+            NIXL_PREFILL_UCX_NUM_THREADS if backend == "UCX" else 8
+        )
         agent_config = nixl_agent_config(
             backends=[],
-            num_threads=8,
+            num_threads=probe_num_threads,
             sync_mode=nixl_thread_sync_t.NIXL_THREAD_SYNC_STRICT,
         )
         agent = nixl_agent(f"sglang_nixl_probe_{uuid.uuid4()}", agent_config)
@@ -115,11 +281,50 @@ class NixlPDDisaggregationServerBase(PDDisaggregationServerBase):
     prefill_tp_size = NIXL_PREFILL_TP_SIZE
     decode_tp_size = NIXL_DECODE_TP_SIZE
     decode_base_gpu_id = NIXL_DECODE_BASE_GPU_ID
-    extra_prefill_args = ["--mem-fraction-static", "0.92"]
-    extra_decode_args = ["--mem-fraction-static", "0.92"]
+    prefill_ucx_num_threads = NIXL_PREFILL_UCX_NUM_THREADS
+    decode_ucx_num_threads = NIXL_DECODE_UCX_NUM_THREADS
+    _hca_resource_monitor = None
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls._hca_resource_monitor = _HcaResourceMonitor(cls.__name__)
+        cls._hca_resource_monitor.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        try:
+            super().tearDownClass()
+        finally:
+            if cls._hca_resource_monitor is not None:
+                cls._hca_resource_monitor.stop()
+                cls._hca_resource_monitor = None
+
+    @classmethod
+    def launch_all(cls):
+        print(
+            f"{cls.__name__} NIXL UCX threads: "
+            f"prefill={cls.prefill_ucx_num_threads}, "
+            f"decode={cls.decode_ucx_num_threads}",
+            flush=True,
+        )
+        cls._hca_snapshot("before launch_all")
+        try:
+            super().launch_all()
+        finally:
+            cls._hca_snapshot("after launch_all")
+
+    @classmethod
+    def _hca_snapshot(cls, label):
+        if cls._hca_resource_monitor is not None:
+            cls._hca_resource_monitor.snapshot(label)
 
     @classmethod
     def start_prefill(cls):
+        prefill_env = {
+            **cls.extra_prefill_env,
+            **_nixl_ucx_backend_env(cls.prefill_ucx_num_threads),
+        }
         prefill_args = [
             "--trust-remote-code",
             "--disaggregation-mode",
@@ -135,7 +340,7 @@ class NixlPDDisaggregationServerBase(PDDisaggregationServerBase):
             cls.prefill_url,
             timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
             other_args=prefill_args,
-            env=dict(cls.extra_prefill_env),
+            env=prefill_env,
             return_stdout_stderr=(
                 (cls._prefill_stdout_buf, cls._prefill_stderr_buf)
                 if cls.capture_per_side_logs
@@ -145,6 +350,10 @@ class NixlPDDisaggregationServerBase(PDDisaggregationServerBase):
 
     @classmethod
     def start_decode(cls):
+        decode_env = {
+            **cls.extra_decode_env,
+            **_nixl_ucx_backend_env(cls.decode_ucx_num_threads),
+        }
         decode_args = [
             "--trust-remote-code",
             "--disaggregation-mode",
@@ -162,7 +371,7 @@ class NixlPDDisaggregationServerBase(PDDisaggregationServerBase):
             cls.decode_url,
             timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
             other_args=decode_args,
-            env=dict(cls.extra_decode_env),
+            env=decode_env,
             return_stdout_stderr=(
                 (cls._decode_stdout_buf, cls._decode_stderr_buf)
                 if cls.capture_per_side_logs
@@ -240,6 +449,8 @@ class TestDisaggregationNixlBasic(NixlPDDisaggregationServerBase):
     "NIXL with the configured backend is required for this test.",
 )
 class TestDisaggregationNixlAccuracy(NixlPDDisaggregationServerBase):
+    prefill_ucx_num_threads = NIXL_ACCURACY_PREFILL_UCX_NUM_THREADS
+
     @classmethod
     def setUpClass(cls):
         _require_configured_nixl_backend()
@@ -279,6 +490,8 @@ class TestDisaggregationNixlAccuracy(NixlPDDisaggregationServerBase):
     "NIXL with the configured backend is required for this test.",
 )
 class TestDisaggregationNixlFailure(NixlPDDisaggregationServerBase):
+    prefill_ucx_num_threads = NIXL_FAILURE_PREFILL_UCX_NUM_THREADS
+
     @classmethod
     def setUpClass(cls):
         _require_configured_nixl_backend()
