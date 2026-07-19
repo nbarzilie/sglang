@@ -29,7 +29,6 @@ NIXL_PREFILL_TP_SIZE = 4
 NIXL_DECODE_TP_SIZE = 4
 NIXL_DECODE_BASE_GPU_ID = 4
 NIXL_PREFILL_UCX_NUM_THREADS = 2
-NIXL_DECODE_UCX_NUM_THREADS = 0
 
 # This is a PD transfer functional gate, not the standalone model-quality gate.
 # The standalone Llama-3.1-8B GSM8K threshold is 0.80, while existing PD
@@ -65,7 +64,7 @@ def _nixl_backend_config(
     return backend, backend_params
 
 
-def _nixl_ucx_backend_env(num_threads):
+def _nixl_prefill_ucx_backend_env():
     backend = envs.SGLANG_DISAGGREGATION_NIXL_BACKEND.get()
     if backend != "UCX":
         return {}
@@ -73,7 +72,7 @@ def _nixl_ucx_backend_env(num_threads):
     _, backend_params = _nixl_backend_config(
         backend,
         envs.SGLANG_DISAGGREGATION_NIXL_BACKEND_PARAMS.get(),
-        ucx_num_threads=num_threads,
+        ucx_num_threads=NIXL_PREFILL_UCX_NUM_THREADS,
     )
     return {"SGLANG_DISAGGREGATION_NIXL_BACKEND_PARAMS": json.dumps(backend_params)}
 
@@ -142,7 +141,7 @@ class NixlPDDisaggregationServerBase(PDDisaggregationServerBase):
     def start_prefill(cls):
         prefill_env = {
             **cls.extra_prefill_env,
-            **_nixl_ucx_backend_env(NIXL_PREFILL_UCX_NUM_THREADS),
+            **_nixl_prefill_ucx_backend_env(),
         }
         prefill_args = [
             "--trust-remote-code",
@@ -169,10 +168,6 @@ class NixlPDDisaggregationServerBase(PDDisaggregationServerBase):
 
     @classmethod
     def start_decode(cls):
-        decode_env = {
-            **cls.extra_decode_env,
-            **_nixl_ucx_backend_env(NIXL_DECODE_UCX_NUM_THREADS),
-        }
         decode_args = [
             "--trust-remote-code",
             "--disaggregation-mode",
@@ -190,7 +185,7 @@ class NixlPDDisaggregationServerBase(PDDisaggregationServerBase):
             cls.decode_url,
             timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
             other_args=decode_args,
-            env=decode_env,
+            env=cls.extra_decode_env,
             return_stdout_stderr=(
                 (cls._decode_stdout_buf, cls._decode_stderr_buf)
                 if cls.capture_per_side_logs
